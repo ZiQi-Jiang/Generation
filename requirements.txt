@@ -1,0 +1,9 @@
+
+accelerate==1.13.0 
+diffusers==0.26.3 
+einops==0.8.2   
+huggingface-hub==0.25.2
+timm==1.0.25
+scipy==1.15.3
+torch-fidelity==0.3.0
+numpy==1.26.4
