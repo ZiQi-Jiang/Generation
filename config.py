@@ -22,6 +22,8 @@ class SimpleLogger:
         self.terminal.flush()
         self.log_file.flush()
 
+    def isatty(self):
+        return False
     def close(self):
         if not self.log_file.closed:
             self.log_file.close()
@@ -29,51 +31,37 @@ class SimpleLogger:
     def __del__(self):
         self.close()
 
-def set_seed(seed):
-    """
-    Sets the seed for various random number generators to ensure reproducibility.
-    """
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)  # Numpy module.
-    random.seed(seed)  # Python random module.
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-
 class DefaultConfig:
     def __init__(self):
         # =================================================================
         # Basic Training Parameters
         # =================================================================
-        self.batch_size = 64
-        self.epochs = 80
+        self.batch_size = 128
+        self.epochs = 200
         self.num_classes = 1000
         self.seed = 0
-        self.model_type = 'SiT-S/2' 
+        self.model_type = 'JiT-B/16' 
         self.image_size = 256 
-        self.vae = 'ema' # ['ema', 'mse'] 
+        self.noise_scale = self.image_size / 256 * 1.0
+        self.blr = 5e-5
+        self.warmup_epochs = 5
+
+        # for logit-normal timestep sampling
+        self.P_mean = -0.8
+        self.P_std =  0.8
+
         # saving and logging
         self.timestamp = datetime.datetime.now().strftime("%H%M%S") # 
         self.data_path = './data/imagenet/images/train'
 
-        # =================================================================
-        # Negative Flow Matching Parameters
-        # =================================================================  
-        self.flow_type = 'standard' #['standard', 'delta', 'neg'(ours)]
-        self.use_repa = False # Ture: only use Dinov2-vit-b. 
-        self.lam = 0.2 # weight used in deltaFM and NegFM.
-        self.neg_type = 'res xt' # [ 'res xt', 'res x1', 'res vt'] --- only used when flow_type is 'neg'.
-        self.neg_policy = 'random' # ['random', 'nearest', 'vote']
+   
 
         
         # other helper parameters (only changed here)
-        self.log_every = 100
-        self.save_every = 50_000
+        self.log_step_freq = 20
+        self.save_epoch_freq = 50
         self.resume_exp = None # timestamp to resume training; None for training from scratch.
-        self.resume_step = None # checkpoint step to load when resuming training.
-        self.align_x0 = False # whether use the same x0(noise) for samples and corresponding negatives.
+        self.resume_epoch = None # checkpoint step to load when resuming training.
 
 
     def save(self, file_path=None):
