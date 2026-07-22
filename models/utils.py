@@ -38,12 +38,28 @@ def add_weight_decay(model, weight_decay=0, skip_list=()):
     ]
 
 
+
+def pixel_modulate(x, shift, scale):
+    """"
+    x: (B, N, D)
+    shift, scale: (B,N,D) or (B,1,D)
+    """
+    return x * (1 + scale) + shift
+
 def modulate(x, shift, scale):
     """"
     x: (B, N, D)
     shift, scale: (B,D)
     """
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+
+def modulate_token(x, shift, scale):
+    """"
+    x: (B, N, D)
+    shift, scale: (B,N,D)
+    """
+    return x * (1 + scale) + shift
 
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
@@ -198,4 +214,3 @@ class VisionRotaryEmbeddingFast(nn.Module):
             self.freqs_sin = freqs.sin().view(-1, freqs.shape[-1]).cuda()
 
     def forward(self, x): return  x * self.freqs_cos + rotate_half(x) * self.freqs_sin
-

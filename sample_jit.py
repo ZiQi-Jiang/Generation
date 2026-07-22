@@ -100,9 +100,9 @@ def sample(model,  accelerator, sample_dir, sample_args,train_cfg):
 
     accelerator.wait_for_everyone()
     accelerator.print(f"Finished generating {samples_per_gpu* accelerator.num_processes} samples. Saved to {sample_dir}/")
-    if accelerator.is_main_process:
-        create_npz_from_sample_folder(sample_dir, num=sample_args.num_samples)
-    accelerator.print(f"Finished creating .npz file from samples")
+    # if accelerator.is_main_process:
+    #     create_npz_from_sample_folder(sample_dir, num=sample_args.num_samples)
+    # accelerator.print(f"Finished creating .npz file from samples")
 
 def create_npz_from_sample_folder(sample_dir, num=50_000):
     """
@@ -162,6 +162,14 @@ def main(sample_args):
     model = JiT_models[train_cfg.model_type](input_size=train_cfg.image_size, in_channels=3, num_classes=train_cfg.num_classes, mlp_ratio=4)
 
     model.load_state_dict(state_dict['ema'])
+    # new_state_dict = {}
+    # for k, v in state_dict['model_ema1'].items():
+    #     if k.startswith('net.'):
+    #         name = k[4:]
+    #     else:
+    #         name = k
+    #     new_state_dict[name] = v
+    # model.load_state_dict(new_state_dict)
     model.eval()
     model = accelerator.prepare(model)
 
@@ -197,7 +205,7 @@ def main(sample_args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sample from the trained model")
     parser.add_argument('--exp', type=str, default=None, help='Timestamp of the experiment to load (default, using JiT-B/16 trained on 1000 classes)')
-    parser.add_argument('--epoch', type=int, default=None, help='Checkpoint step to load')
+    parser.add_argument('--epoch', type=int, default=200, help='Checkpoint step to load')
     parser.add_argument('--sample_seed', type=int, default=0, help='Random seed for sampling')
     parser.add_argument('--cfg_scale', type=float, default=1.0,  help='Classifier-free guidance scale')
     parser.add_argument('--cfg_min', type=float, default=0.1, help="CFG interval min")

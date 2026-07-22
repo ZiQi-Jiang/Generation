@@ -90,7 +90,7 @@ class LabelEmbedder(nn.Module):
 class FinalLayer(nn.Module):
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
-        self.norm = RMSNorm(hidden_size)
+        self.norm_final = RMSNorm(hidden_size)
         self.linear = nn.Linear(hidden_size, patch_size*patch_size*out_channels)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
@@ -104,7 +104,7 @@ class FinalLayer(nn.Module):
         c: (B, D)
         """
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1) # (B,N)
-        x = modulate(self.norm(x), shift, scale)
+        x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
 
@@ -136,7 +136,7 @@ class JiTBlock(nn.Module):
         return x
 
 class JiT(nn.Module):
-    def __init__(self, input_size, mlp_ratio, in_channels, num_classes,  depth, hidden_size,  num_heads, bottleneck_dim, in_context_len, in_context_start, patch_size):
+    def __init__(self, input_size, mlp_ratio, in_channels, num_classes,  depth, hidden_size,  num_heads, bottleneck_dim, in_context_len, in_context_start, patch_size,reg_type=None, repa_depth=4):
         super().__init__()
         self.input_size = input_size
         self.patch_size = patch_size
@@ -148,6 +148,8 @@ class JiT(nn.Module):
         self.bottleneck_dim = bottleneck_dim
         self.in_context_len = in_context_len
         self.in_context_start = in_context_start
+        self.reg_type = reg_type
+        self.repa_depth = repa_depth
 
         # time and condition embedder
         self.t_embedder = TimestepEmbedder(hidden_size=hidden_size)
@@ -176,6 +178,21 @@ class JiT(nn.Module):
         self.blocks = nn.ModuleList([
             JiTBlock(hidden_size=hidden_size, num_heads=num_heads, mlp_ration=mlp_ratio) for i in range(depth)
         ])
+
+        if reg_type == 'repa':
+            # self.repa_depth = 8 if  depth >=24 else 4
+            self.repa_projector = nn.Sequential(
+            nn.Linear(hidden_size, 2048), nn.SiLU(),
+            nn.Linear(2048, 2048), nn.SiLU(),
+            nn.Linear(2048, 768),
+            )
+        elif reg_type == 'irepa':
+            self.repa_projector = nn.Conv2d(in_channels=hidden_size, out_channels=768, kernel_size=3, stride=1, padding=1)
+        elif reg_type == 'disperse':
+            pass
+        elif reg_type == 'ig': # internal guidance
+            self.final_layer_xr = FinalLayer(hidden_size=hidden_size, patch_size=patch_size, out_channels=in_channels)
+
 
         self.final_layer = FinalLayer(hidden_size=hidden_size, patch_size=patch_size, out_channels=in_channels)
 
@@ -218,6 +235,12 @@ class JiT(nn.Module):
 
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+    
+        if self.reg_type == 'ig':
+            nn.init.constant_(self.final_layer_xr.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.final_layer_xr.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.final_layer_xr.linear.weight, 0)
+            nn.init.constant_(self.final_layer_xr.linear.bias, 0)
 
     def unpatchify(self, x):
         # x: (B, N, D)
@@ -246,17 +269,54 @@ class JiT(nn.Module):
                 in_context_tokens = in_context_tokens +  self.in_context_posemb 
                 x = torch.cat([in_context_tokens, x],dim=1) # (B, N+L, D)
             x = block(x, c, feat_rope=self.feat_rope if i < self.in_context_start else self.feat_rope_incontext)
+            
+            # repa
+            if self.training and self.reg_type and (i + 1) == self.repa_depth:
+                x_no_incontext = x[:, self.in_context_len:,:] if i >= self.in_context_start else x # (B, N, D)
+
+                if self.reg_type == 'repa': #linear, direct forward
+                    h = self.repa_projector(x_no_incontext) 
+                
+                elif self.reg_type == 'irepa': # perform spatial normalization
+                    H, W = self.input_size // self.patch_size, self.input_size // self.patch_size
+                    x_no_incontext = rearrange(x_no_incontext, 'b (h w) d -> b d h w', h=H,w=W)
+                    h = self.repa_projector(x_no_incontext)
+                    h = rearrange(h, 'b d h w -> b (h w) d')
+
+                    # perform spatial norm
+                    gamma = 1.0
+                    mean = h.mean(dim=1, keepdim=True)
+                    std  = h.std(dim=1, keepdim=True)
+                    h = (h - gamma * mean) / (std + 1e-6)
+
+                elif self.reg_type == 'disperse':
+                    h = x_no_incontext # (B, N, D)
+                elif self.reg_type == 'ig':
+                    h = self.final_layer_xr(x_no_incontext)
+                    h = self.unpatchify(h) # (B, C, H, W)
+
+
+
         x = x[:, self.in_context_len:,:] # back to (B, N, D)
         x = self.final_layer(x, c) # (B, N, D)
         output = self.unpatchify(x) # (B, C, H, W)
 
-        return output
+        if self.reg_type and self.training:
+            return output, h 
+        else:
+            return output
     
+
 
 
 def JiT_B_16(**kwargs):
     return JiT(depth=12, hidden_size=768, num_heads=12,
                bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs)
+
+
+def JiT_B_16_no_incontext(**kwargs):
+    return JiT(depth=12, hidden_size=768, num_heads=12,
+               bottleneck_dim=128, in_context_len=0, in_context_start=100, patch_size=16, **kwargs)
 
 def JiT_B_32(**kwargs):
     return JiT(depth=12, hidden_size=768, num_heads=12,
@@ -285,4 +345,5 @@ JiT_models = {
     'JiT-L/32': JiT_L_32,
     'JiT-H/16': JiT_H_16,
     'JiT-H/32': JiT_H_32,
+    'JiT-B/16_no_incontext': JiT_B_16_no_incontext
 }

@@ -37,7 +37,7 @@ class DefaultConfig:
         # Basic Training Parameters
         # =================================================================
         self.batch_size = 128
-        self.epochs = 200
+        self.epochs = 80
         self.num_classes = 1000
         self.seed = 0
         self.model_type = 'JiT-B/16' 
@@ -49,20 +49,23 @@ class DefaultConfig:
         # for logit-normal timestep sampling
         self.P_mean = -0.8
         self.P_std =  0.8
-
+        self.ema_decay = 0.9999
         # saving and logging
-        self.timestamp = datetime.datetime.now().strftime("%H%M%S") # 
+        beijing_tz = datetime.timezone(datetime.timedelta(hours=8))  # UTC+8, Beijing time
+        self.timestamp = datetime.datetime.now(beijing_tz).strftime("%Y%m%d_%H%M%S")
         self.data_path = './data/imagenet/images/train'
-
-   
-
         
         # other helper parameters (only changed here)
         self.log_step_freq = 20
-        self.save_epoch_freq = 50
+        self.save_epoch_freq = 40
         self.resume_exp = None # timestamp to resume training; None for training from scratch.
         self.resume_epoch = None # checkpoint step to load when resuming training.
 
+        # our project
+        self.t_level = 'image'
+        self.reg_type = 'none' # 'repa' 'irepa', 'disperse', 'ig'
+        self.reg_depth = 8
+        self.adaln_post_modulation = False
 
     def save(self, file_path=None):
         """Save configuration to JSON file"""
@@ -104,14 +107,17 @@ class DefaultConfig:
         parser.add_argument('--image_size', type=int, help='Size of input images')
         parser.add_argument('--data_path', type=str, help='Path to the training data')
         parser.add_argument('--vae', type=str, help='VAE model to use (ema or mse)')
-        parser.add_argument('--flow_type', type=str, help='Type of flow matching to use')
-        parser.add_argument('--use_repa', action='store_true', help='Whether to use Dinov2-vit-b for representation')
         parser.add_argument('--lam', type=float, help='Weight for deltaFM and NegFM')
-        parser.add_argument('--neg_policy', type=str, help='Policy for selecting negatives (random, nearest, vote)')
-        parser.add_argument('--neg_type', type=str, help='Type of negative flow to use (only for NegFM)')
         parser.add_argument('--resume_exp', type=str, help='Timestamp of the experiment to resume')
-        parser.add_argument('--resume_step', type=int, help='Checkpoint step to load')
-
+        parser.add_argument('--resume_epoch', type=int, help='Checkpoint step to load')
+        parser.add_argument('--t_level', type=str)
+        parser.add_argument('--reg_depth', type=int)
+        parser.add_argument('--reg_type', type=str, help='Regularization type for representation alignment.')
+        parser.add_argument('--P_mean', type=float, help='Mean for logit-normal timestep sampling')
+        parser.add_argument('--P_std', type=float, help='Standard deviation for logit-normal timestep sampling')
+        parser.add_argument('--ema_decay', type=float)
+        parser.add_argument('--blr', type=float, help='Base learning rate')
+        parser.add_argument('--adaln_post_modulation', action='store_true' )
         #for sampling
         parsed_args = parser.parse_args(args=args)
         

@@ -14,6 +14,7 @@ from accelerate.utils import set_seed, broadcast_object_list
 from models.jit import JiT_models
 import numpy as np
 from PIL import Image
+import timm
 from collections import OrderedDict
 from accelerate.utils import TorchDynamoPlugin
 
@@ -62,9 +63,11 @@ def main():
     cfg.results_dir = f'./exp/{cfg.timestamp}/'
 
     set_seed(cfg.seed, device_specific=True)
-    # for acceleration
+    # for accelerationf
 
     torch.set_float32_matmul_precision('high') 
+    # torch.backends.cudnn.benchmark = True
+    #TODO
     torch.backends.cudnn.benchmark = True
     torch._dynamo.config.cache_size_limit = 128
     torch._dynamo.config.optimize_ddp = False
@@ -89,7 +92,8 @@ def main():
 
     dataset = ImageFolder(cfg.data_path, transform=transform)
 
-    dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=12, pin_memory=True, drop_last=True)
+    # TODO:
+    dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=12, pin_memory=True, drop_last=True)
 
     # TODO: proj_drop 
     model = JiT_models[cfg.model_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
@@ -97,7 +101,7 @@ def main():
     for param in ema.parameters():
         param.requires_grad_(False)
     
-    accelerator.register_for_checkpointing(ema) # By default, Accelerator doesn't save EMA, so register it. 
+    # accelerator.register_for_checkpointing(ema) # By default, Accelerator doesn't save EMA, so register it. 
     
     # optimizer
     effective_bs = cfg.batch_size * accelerator.num_processes
@@ -133,13 +137,13 @@ def main():
     ema.eval()
     start_epoch,train_steps, log_steps, running_loss = 1,0,0,0
     train_start_time = time()
-    if cfg.resume_exp is not None: # resume training
-        accelerator.print(f"Resuming from experiment: {cfg.resume_exp}, epoch: {cfg.resume_epoch:03d}")
-        ckpt_path = os.path.join('exp',cfg.resume_exp, f'epochs_{cfg.resume_epoch:03d}')
-        accelerator.load_state(ckpt_path) 
-        start_epoch = cfg.resume_epoch + 1
+    # if cfg.resume_exp is not None: # resume training
+    #     accelerator.print(f"Resuming from experiment: {cfg.resume_exp}, epoch: {cfg.resume_epoch:03d}")
+    #     ckpt_path = os.path.join('exp',cfg.resume_exp, f'epochs_{cfg.resume_epoch:03d}')
+    #     accelerator.load_state(ckpt_path) 
+    #     start_epoch = cfg.resume_epoch + 1
     # rng = torch.Generator(accelerator.device).manual_seed(42) # for negative sampling.
-        
+
     for epoch in range(start_epoch, cfg.epochs+1):
         accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch}/{cfg.epochs}...")
 
@@ -172,7 +176,6 @@ def main():
                 loss = (v_target - v_pred)**2 # (B, C, H, W)
                 loss = loss.mean(dim=[1,2,3]).mean()
 
-            print(loss.item())
             optimizer.zero_grad()
             accelerator.backward(loss)
             optimizer.step()
@@ -195,7 +198,7 @@ def main():
                 log_steps = 0
     
             
-        if epoch % cfg.save_epoch_freq == 0:
+        if epoch % cfg.save_epoch_freq == 0 or epoch == cfg.epochs:
             accelerator.wait_for_everyone()
             
             to_save = {

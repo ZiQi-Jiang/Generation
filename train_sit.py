@@ -147,35 +147,19 @@ def main():
 
     model.train() # important, train(). => class dropout.
     ema.eval()
-    start_epoch,train_steps, log_steps, running_loss = 0,0,0,0
+    start_epoch,train_steps, log_steps, running_loss = 1,0,0,0
     total_steps = len(dataloader) * cfg.epochs
     train_start_time = time()
-    if cfg.resume_exp is not None: # resume training
-        accelerator.print(f"Resuming from experiment: {cfg.resume_exp}, steps: {cfg.resume_step:07d}")
-        ckpt_path = os.path.join('exp',cfg.resume_exp, f'steps_{cfg.resume_step:07d}')
-        steps_per_epoch = len(dataloader)
-        start_epoch = cfg.resume_step // steps_per_epoch
-        resume_step = cfg.resume_step % steps_per_epoch
-        train_steps = cfg.resume_step
 
-    rng = torch.Generator(accelerator.device).manual_seed(42) # for negative sampling.
         
-    for epoch in range(start_epoch, cfg.epochs):
-        accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch+1}/{cfg.epochs}...")
-        if cfg.resume_exp is not None and epoch == start_epoch: # resume training 
-            train_loader = iter(dataloader)
-            for _ in range(resume_step):
-                next(train_loader)
-            accelerator.load_state(ckpt_path) # after skip batches!
-            accelerator.print(f"Resumed dataloader and checkpoints, skipped {resume_step} batches for epoch {epoch+1}.")
-        else: # from scratch, or normal epoch after resuming.
-            train_loader = dataloader
-        for raw_x, y in train_loader: #raw_x: [0-1]
+    for epoch in range(start_epoch, cfg.epochs+1):
+        accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch}/{cfg.epochs}...")
+   
+        for raw_x, y in dataloader: #raw_x: [0-1]
             with torch.no_grad(): # vae should be fp32.
                 # vae input: [-1,1].
                 x1 = Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=False)(raw_x)
-                x1 = vae.encode(x1).latent_dist.sample().mul_(0.18215)  # [B_local, C, H/8, W/8]
-
+        
                 if cfg.use_repa:
                     repa_x1 = Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)(raw_x)
                     repa_x1 = F.interpolate(repa_x1, 224*(cfg.image_size//256), mode='bicubic')
@@ -183,146 +167,23 @@ def main():
                 
             with accelerator.autocast():
                 x0 = torch.randn_like(x1) 
+
+
                 t = torch.rand((x1.shape[0],)).to(accelerator.device) # [B_local, ]
-                t_expand = rearrange(t, 'b -> b 1 1 1')
-                xt = x0 * (1 - t_expand) + x1 * t_expand 
+                t = rearrange(t, 'b -> b 1 1 1')
+                xt = x0 * (1 - t) + x1 * t
                 target_v = x1 - x0 # [B_local, C, H/8, W/8]
 
-
-                if cfg.flow_type == 'standard': # standard flow matching, no negative samples.
-                    neg_x0, neg_x1 = None, None
-
-                elif cfg.flow_type == 'delta': # in local batch, consistent with its official code.
-                    local_idx = torch.arange(x1.shape[0], device=x1.device)
-                    random_offset = torch.randint(1, x1.shape[0],(x1.shape[0],), generator=rng, device=x1.device)
-                    delta_idx = (local_idx + random_offset) % x1.shape[0]
-                    delta_v = target_v[delta_idx]
-                else:   # negative flow matching. 
-                    global_x0 = accelerator.gather(x0) #[B_global, C, H/8, W/8]
-                    global_x1 = accelerator.gather(x1) 
-                    global_xt = accelerator.gather(xt) 
-                    global_t = accelerator.gather(t)
-                    global_v = global_x1 - global_x0 
-                    global_bsz = global_xt.shape[0]
-
-                    # 1) select negatives.
-                    if cfg.neg_policy == 'random':
-                        global_idx = torch.arange(global_bsz,device=global_xt.device)
-                        random_offset = torch.randint(1, global_bsz,(global_bsz,), generator=rng, device=global_x1.device)
-                        global_neg_idx = (global_idx + random_offset) % global_bsz #[B_global, ]
-                        
-                    elif cfg.neg_policy == 'nearest': # xt to calculate dist.
-                        dist_feat = rearrange(global_xt, 'b c h w -> b (c h w)') #[B_global, D]
-                        dist = torch.cdist(dist_feat, dist_feat, p=2) #[B_global, B_global]
-                        dist.fill_diagonal_(float('inf')) # avoid selecting itself
-                        global_neg_idx = torch.argmin(dist, dim=1) # [B_global, ]
-                    elif cfg.neg_policy == 'nearest true':
-                        dist = compute_xt_distance(global_x0, global_x1, global_t) #[B_global, B_global]
-                        dist.fill_diagonal_(float('inf')) # avoid selecting itself
-                        global_neg_idx = torch.argmin(dist, dim=1) # [B_global,
-
-                    elif cfg.neg_policy == 'lip': # approximate lipschitz at x0.
-                        x = rearrange(global_x0, 'b c h w -> b (c h w)') #[B_global, D]
-                        v = rearrange(global_v, 'b c h w -> b (c h w)') #[B_global, D]
-                        dist_x = torch.cdist(x, x, p=2) #[B_global, B_global]
-                        dist_v = torch.cdist(v, v, p=2) #[B_global, B_global]
-                        dist_x.fill_diagonal_(float('inf')) # avoid selecting itself
-                        lipschitz = dist_v / (dist_x + 1e-8)
-                        global_neg_idx = torch.argmax(lipschitz, dim=1) # [B_global, ]
-
-                    elif cfg.neg_policy == 'lip true': # no approximation.
-                        dist_x = compute_xt_distance(global_x0, global_x1, global_t) #[B_global, B_global]
-                        v = rearrange(global_v, 'b c h w -> b (c h w)')
-                        dist_v = torch.cdist(v, v, p=2)
-                        dist_x.fill_diagonal_(float('inf')) 
-                        lipschitz = dist_v / (dist_x + 1e-8)
-                        global_neg_idx = torch.argmax(lipschitz, dim=1) 
-
-                    elif cfg.neg_policy == 'vote': # vote for the most frequent negatives.
-                        dist_feat = rearrange(global_xt, 'b c h w -> b (c h w)') #[B_global, D]
-                        dist = torch.cdist(dist_feat, dist_feat, p=2) #[B_global, B_global]
-                        dist.fill_diagonal_(float('inf')) # avoid selecting itself
-                        global_raw_neg_idx = torch.argmin(dist, dim=1) # [B_global, ]
-                        counts = torch.bincount(global_raw_neg_idx, minlength=global_bsz)
-                        _, topk_frequent_idx = torch.topk(counts, k=1) # [1]
-                        global_neg_idx = torch.full((global_bsz,), fill_value=topk_frequent_idx[0], device=dist.device) # [B_local, ]
-                    else:
-                        raise ValueError(f"Invalid neg_policy: {cfg.neg_policy}")
-                    rank,local_bsz = accelerator.process_index, xt.shape[0]
-                    local_neg_idx = global_neg_idx[rank * local_bsz : (rank + 1) * local_bsz]
-                    neg_x1 = global_x1[local_neg_idx] #[B_local, C, H/8, W/8]
-                    neg_x0 = x0 if cfg.align_x0 else global_x0[local_neg_idx] #[B_local, C, H/8, W/8]
-
-                # 2) sample negative features and velocity.
-                if cfg.flow_type == 'neg': # our method
-                    if cfg.neg_type == 'x1':
-                        neg_features = neg_x1
-                        neg_velocity = 0 
-                  
-                    elif cfg.neg_type == 'xt':
-                        neg_features = t_expand * neg_x1 + (1-t_expand) * neg_x0
-                        neg_velocity = neg_x1 - neg_x0
-                    
-                    elif cfg.neg_type == 'vt':
-                        neg_features =  neg_x1 - neg_x0
-                        neg_velocity = 0 
-              
-                    elif cfg.neg_type == 'res x1':
-                        neg_features = neg_x1 - x1
-                        neg_velocity = 0
-
-                    elif cfg.neg_type == 'res xt':
-                        neg_features = (t_expand * neg_x1 + (1-t_expand) * neg_x0) - (t_expand * x1 + (1-t_expand) * x0)
-                        neg_velocity = (neg_x1 - neg_x0) - (x1 - x0)
-                    
-                    elif cfg.neg_type == 'res xt norm':
-                        res_xt =  (t_expand * neg_x1 + (1-t_expand) * neg_x0) - (t_expand * x1 + (1-t_expand) * x0)
-                        res_v = (neg_x1 - neg_x0) - (x1 - x0)
-                        
-                        dim = res_xt.shape[1] * res_xt.shape[2] * res_xt.shape[3]
-                        true_norm = res_xt.norm(dim=[1,2,3], p=2, keepdim=True)
-                        scale = dim ** 0.5
-                        
-                        neg_features = (res_xt / true_norm) * scale
-                        neg_velocity = (res_v / true_norm - res_xt * (res_xt * res_v).sum(dim=[1,2,3], keepdim=True) / (true_norm ** 3)) * scale
-                        # res_xt_flat = rearrange(res_xt, 'b c h w -> b (c h w)')
-                        # # res_v_flat = rearrange(res_v, 'b c h w -> b (c h w)')
-                        # res_dim = res_xt_flat.shape[1]
-                        # res_norm = res_xt_flat.pow(2).mean(dim=1, keepdim=True).sqrt().clamp_min(1e-6)
-                        # res_dot = (res_xt_flat * res_v_flat).sum(dim=1, keepdim=True)
-
-                        # neg_features_flat = res_xt_flat / res_norm
-                        # neg_velocity_flat = res_v_flat / res_norm - res_xt_flat * res_dot / (res_dim * res_norm ** 3)
-                        # neg_features = rearrange(neg_features_flat, 'b (c h w) -> b c h w', c=x1.shape[1], h=x1.shape[2], w=x1.shape[3])
-                        # neg_velocity = rearrange(neg_velocity_flat, 'b (c h w) -> b c h w', c=x1.shape[1], h=x1.shape[2], w=x1.shape[3])
-                        
-                    elif cfg.neg_type == 'res vt':
-                        neg_features = (neg_x1 - neg_x0) - (x1 - x0)
-                        neg_velocity = 0
-                    elif cfg.neg_type == 'noise': # bridge model/ stocastic interpolation.
-                        neg_features = torch.randn(x1.shape,generator=rng, device=x1.device)
-                        neg_velocity = 0
-                    else:
-                        raise ValueError(f"Invalid neg_type: {cfg.neg_type}")
-
-                    # 3) adjust the trajectory and target.
-              
-                    xt = xt - cfg.lam * t_expand * (1 - t_expand) * neg_features
-                    target_v = target_v - cfg.lam * (1 - 2*t_expand) * neg_features - cfg.lam * t_expand * (1 - t_expand) * neg_velocity
-
                 if cfg.use_repa:
-                    pred_v, h = model(xt, t, y)
+                    pred_v, h = model(xt, t.flatten(), y)
                     h, repa_x1 = F.normalize(h, dim=-1), F.normalize(repa_x1, dim=-1) #[B, T, D]
                     repa_loss = - (h * repa_x1).sum(dim=-1).mean()
                 else:
-                    pred_v = model(xt, t, y) #[B, C, H ,W]
+                    pred_v = model(xt, t.flatten(), y) #[B, C, H ,W]
                     repa_loss = 0
                 fm_loss = torch.mean((pred_v - target_v) ** 2) # over all dimensions
-                if cfg.flow_type == 'delta': # deltaFM
-                    delta_loss = torch.mean((pred_v - delta_v) ** 2)
-                    loss = fm_loss - 0.05 * delta_loss + 0.5 * repa_loss
-                else: # for standard FM or our NegFM,
-                    loss = fm_loss + 0.5 * repa_loss
+
+                loss = fm_loss + 0.5 * repa_loss
             optimizer.zero_grad()
             accelerator.backward(loss)
             if cfg.use_repa:
@@ -349,11 +210,22 @@ def main():
                 log_steps = 0
     
             
-            if train_steps % cfg.save_every == 0 or train_steps == total_steps:
-                accelerator.wait_for_everyone()
-                checkpoint_path = os.path.join(cfg.results_dir, f"steps_{train_steps:07d}")
-                accelerator.save_state(checkpoint_path)
-                accelerator.print(f"✅ Saved checkpoint at: {checkpoint_path}")
+        if epoch % cfg.save_epoch_freq == 0 or epoch == cfg.epochs:
+            accelerator.wait_for_everyone()
+            
+            to_save = {
+                "model": accelerator.unwrap_model(model).state_dict(),
+                "ema": ema.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": epoch,
+                "args": cfg,
+            }
+
+            checkpoint_path = os.path.join(cfg.results_dir, f"epoch_{epoch:03d}.pth")
+            if accelerator.is_main_process:
+                torch.save(to_save, checkpoint_path)
+            # accelerator.save_state(checkpoint_path)
+            accelerator.print(f"✅ Saved checkpoint at: {checkpoint_path}")
             
 
 if __name__ == '__main__':
