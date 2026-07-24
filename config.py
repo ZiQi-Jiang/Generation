@@ -67,6 +67,11 @@ class DefaultConfig:
         self.reg_depth = 8
         self.adaln_post_modulation = False
 
+
+        # for CoFlow
+        self.flow_type = 'standard'
+        self.lam = 0.2
+
     def save(self, file_path=None):
         """Save configuration to JSON file"""
         if file_path is None:
@@ -107,7 +112,7 @@ class DefaultConfig:
         parser.add_argument('--image_size', type=int, help='Size of input images')
         parser.add_argument('--data_path', type=str, help='Path to the training data')
         parser.add_argument('--vae', type=str, help='VAE model to use (ema or mse)')
-        parser.add_argument('--lam', type=float, help='Weight for deltaFM and NegFM')
+
         parser.add_argument('--resume_exp', type=str, help='Timestamp of the experiment to resume')
         parser.add_argument('--resume_epoch', type=int, help='Checkpoint step to load')
         parser.add_argument('--t_level', type=str)
@@ -118,6 +123,11 @@ class DefaultConfig:
         parser.add_argument('--ema_decay', type=float)
         parser.add_argument('--blr', type=float, help='Base learning rate')
         parser.add_argument('--adaln_post_modulation', action='store_true' )
+
+
+        # for CoFlow
+        parser.add_argument('--flow_type',type=str)
+        parser.add_argument('--lam', type=float, help='Weight for deltaFM and NegFM')
         #for sampling
         parsed_args = parser.parse_args(args=args)
         

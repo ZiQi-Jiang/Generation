@@ -142,7 +142,7 @@ def main():
     #     ckpt_path = os.path.join('exp',cfg.resume_exp, f'epochs_{cfg.resume_epoch:03d}')
     #     accelerator.load_state(ckpt_path) 
     #     start_epoch = cfg.resume_epoch + 1
-    # rng = torch.Generator(accelerator.device).manual_seed(42) # for negative sampling.
+    rng = torch.Generator(accelerator.device).manual_seed(42) # for negative sampling.
 
     for epoch in range(start_epoch, cfg.epochs+1):
         accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch}/{cfg.epochs}...")
@@ -171,6 +171,29 @@ def main():
                 x0 = torch.randn_like(x1) * cfg.noise_scale
                 xt = x0 * (1 - t) + x1 * t
                 v_target = (x1 - xt) / (1-t).clamp_min(0.05)
+                if cfg.flow_type =='standard':
+                    neg_x0, neg_x1 = None, None
+                elif cfg.flow_type == 'neg':
+                    global_x0 = accelerator.gather(x0) #[B_global, C, H/8, W/8]
+                    global_x1 = accelerator.gather(x1) 
+                    global_xt = accelerator.gather(xt) 
+                    global_t = accelerator.gather(t)
+                    global_bsz = global_xt.shape[0]
+                    global_idx = torch.arange(global_bsz,device=global_xt.device)
+                    random_offset = torch.randint(1, global_bsz,(global_bsz,), generator=rng, device=global_x1.device)
+                    global_neg_idx = (global_idx + random_offset) % global_bsz #[B_global, ]
+                    rank,local_bsz = accelerator.process_index, xt.shape[0]
+                    local_neg_idx = global_neg_idx[rank * local_bsz : (rank + 1) * local_bsz]
+                    neg_x1 = global_x1[local_neg_idx] #[B_local, C, H/8, W/8]
+                    neg_x0 = global_x0[local_neg_idx] #[B_local, C, H/8, W/8]
+                    neg_xt = global_xt[local_neg_idx]
+                    neg_t = global_t[local_neg_idx]
+                    neg_features = (t * neg_x1 + (1-t) * neg_x0) - (t * x1 + (1-t) * x0)
+                    # neg_velocity = (neg_x1 - neg_x0) - (x1 - x0)
+                    neg_velocity = (neg_x1 - neg_xt) / (1-neg_t).clamp_min(0.05)
+
+                xt = xt - cfg.lam * t * (1 - t) * neg_features
+                v_target = v_target - cfg.lam * (1 - 2*t) * neg_features - cfg.lam * t * (1 - t) * neg_velocity
                 x1_pred = model(xt, t.flatten(), y)
                 v_pred = (x1_pred - xt) / (1 - t).clamp_min(0.05)
                 loss = (v_target - v_pred)**2 # (B, C, H, W)

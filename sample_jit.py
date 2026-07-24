@@ -100,9 +100,9 @@ def sample(model,  accelerator, sample_dir, sample_args,train_cfg):
 
     accelerator.wait_for_everyone()
     accelerator.print(f"Finished generating {samples_per_gpu* accelerator.num_processes} samples. Saved to {sample_dir}/")
-    # if accelerator.is_main_process:
-    #     create_npz_from_sample_folder(sample_dir, num=sample_args.num_samples)
-    # accelerator.print(f"Finished creating .npz file from samples")
+    if accelerator.is_main_process:
+        create_npz_from_sample_folder(sample_dir, num=sample_args.num_samples)
+    accelerator.print(f"Finished creating .npz file from samples")
 
 def create_npz_from_sample_folder(sample_dir, num=50_000):
     """
@@ -198,8 +198,10 @@ def main(sample_args):
             verbose=False,
         )
         accelerator.print(f"FID: {metrics_dict['frechet_inception_distance']:.4f}, Inception Score: {metrics_dict['inception_score_mean']:.4f}")
-        # evaluator = Evaluator(accelerator.device)
-        # evalutate(evaluator = evaluator, ref_batch_path='./data/VIRTUAL_imagenet256_labeled.npz', sample_batch_path=f'{sample_dir}/generated_samples.npz')
+
+        # Evaluating using ADM suite.
+        evaluator = Evaluator(accelerator.device)
+        evalutate(evaluator = evaluator, ref_batch_path='./data/VIRTUAL_imagenet256_labeled.npz', sample_batch_path=f'{sample_dir}/generated_samples.npz')
 
    
 if __name__ == "__main__":

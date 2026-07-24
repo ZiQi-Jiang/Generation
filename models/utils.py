@@ -167,7 +167,7 @@ class Attention(nn.Module):
         q, k =  self.q_norm(q), self.k_norm(k)
         q, k = rope(q), rope(k) #[B, num_heads, N, D//num_heads]
 
-        # attention
+        # Option 1: vanilla attention
         attn_bias = q.new_zeros(q.size(0), 1, q.size(2), k.size(2))
         scale_factor = 1/ math.sqrt(q.size(-1))
 
@@ -177,6 +177,9 @@ class Attention(nn.Module):
         attn_weight += attn_bias
         attn_weight = torch.softmax(attn_weight, dim=-1)
         x = attn_weight @ v # [B, num_heads, N, d]
+
+        # Option 2: Flash Attention (automatically picks optimal backend: FlashAttention-2, Memory-Efficient, or fallback)
+        # x = F.scaled_dot_product_attention(q, k, v)
         x = rearrange(x, 'B num_heads N d -> B N (num_heads d)') # (B, N, D)
         x = self.proj(x)
         return x
