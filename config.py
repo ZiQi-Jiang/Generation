@@ -37,7 +37,7 @@ class DefaultConfig:
         # Basic Training Parameters
         # =================================================================
         self.batch_size = 128
-        self.epochs = 80
+        self.epochs = 40
         self.num_classes = 1000
         self.seed = 0
         self.model_type = 'JiT-B/16' 
@@ -64,9 +64,12 @@ class DefaultConfig:
         # our project
         self.t_level = 'image'
         self.reg_type = 'none' # 'repa' 'irepa', 'disperse', 'ig'
-        self.reg_depth = 8
+        self.reg_depth = 4
         self.adaln_post_modulation = False
 
+        # for sra
+        self.t_max = 0.2
+        self.reg_depth_tea = 8
 
         # for CoFlow
         self.flow_type = 'standard'

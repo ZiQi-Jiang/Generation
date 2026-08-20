@@ -94,7 +94,7 @@ def main():
     dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=12, pin_memory=True, drop_last=True)
 
     # TODO: proj_drop 
-    model = JiT_models[cfg.model_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4, reg_type = cfg.reg_type, repa_depth=cfg.repa_depth)
+    model = JiT_models[cfg.model_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4, reg_type = cfg.reg_type, reg_depth=cfg.reg_depth)
     ema = deepcopy(model).to(accelerator.device)
     for param in ema.parameters():
         param.requires_grad_(False)
@@ -115,7 +115,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lr_lambda)
 
     # model = torch.compile(model)
-    dataloader, model, optimizer, = accelerator.prepare(dataloader, model,  optimizer)
+    dataloader, model, optimizer, scheduler = accelerator.prepare(dataloader, model,  optimizer, scheduler)
 
     accelerator.print(f"Num proccess: {accelerator.num_processes}; Mixed precision: {accelerator.mixed_precision}")
     accelerator.print(f"Dataset size: {len(dataset)} images")
@@ -141,7 +141,6 @@ def main():
         repa_encoder.head = torch.nn.Identity()
         repa_encoder = repa_encoder.to(accelerator.device)
         repa_encoder.eval()
-        repa_encoder.forward_features = torch.compile(repa_encoder.forward_features)
 
     model.train() # important, train(). => class dropout.
     ema.eval()
@@ -157,7 +156,7 @@ def main():
     for epoch in range(start_epoch, cfg.epochs+1):
         accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch}/{cfg.epochs}...")
 
-        for raw_x, y in dataloader: 
+        for raw_x, raw_y in dataloader: 
             # x1: (B,C,H,W)
             # y: (B,)
             
@@ -166,8 +165,8 @@ def main():
             x1 = 2.0 * raw_x - 1.0  
 
             # dropout labels, here we use constant dropout ratio as 0.1
-            drop_ids = torch.rand(y.shape[0], device=y.device) < 0.1
-            y =  torch.where(drop_ids, cfg.num_classes, y)
+            drop_ids = torch.rand(raw_y.shape[0], device=raw_y.device) < 0.1
+            y =  torch.where(drop_ids, cfg.num_classes, raw_y) # label dropout for cfg.
 
             if cfg.reg_type == 'repa':
                 repa_x1 = Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)(raw_x)
@@ -194,20 +193,34 @@ def main():
                     reg_lam = 0.5
                 elif cfg.reg_type == 'disperse':
                     x1_pred, h = model(xt, t.flatten(), y)
-                    h = h.reshape((z.shape[0],-1)) # flatten
-                    diff = torch.nn.functional.pdist(z).pow(2)/z.shape[1] # pairwise distance
-                    diff = torch.concat((diff, diff, torch.zeros(z.shape[0]).cuda()))  # match JAX implementation of full BxB matrix
+                    h = h.reshape((h.shape[0],-1)) # flatten [B, TD]
+                    diff = F.pdist(h).pow(2)/h.shape[1] # pairwise distance
+                    diff = torch.concat((diff, diff, torch.zeros(h.shape[0], device=accelerator.device)))  # match JAX implementation of full BxB matrix
                     reg_loss = torch.log(torch.exp(-diff).mean()) # calculate loss
                     reg_lam = 0.25
                 elif cfg.reg_type == 'ig':
                     x1_pred, x1_h = model(xt, t.flatten(), y)# (B, C, H W) each
-                    v_h = (x1_h - xt ) (1-t).clamp_min(0.05)
+                    v_h = (x1_h - xt ) / (1-t).clamp_min(0.05)
                     reg_loss = (v_target - v_h)**2
                     reg_loss = reg_loss.mean()
                     reg_lam = 0.5
-                else:
+                elif cfg.reg_type == 'sra':
+                    x1_pred, x1_h_stu = model(xt, t.flatten(), y)
+
+                    t_tea =torch.clamp( t + (cfg.t_max * torch.rand_like(t)), 0, 1)
+                    xt_tea = x0 * (1 - t_tea) + x1 * t_tea
+                    ema.reg_depth = cfg.reg_depth_tea
+                    with torch.no_grad():
+                        x1_h_tea = ema(xt_tea, t_tea.flatten(), y, only_features=True)
+
+                    reg_loss = 1 - F.cosine_similarity(x1_h_tea, x1_h_stu, dim=-1)
+                    reg_loss = reg_loss.mean()
+                    reg_lam = 0.5
+                    
+                else: # no reg.
                     x1_pred = model(xt, t.flatten(), y)
-                    reg_loss = 0.
+                    reg_loss = 0.0
+                    reg_lam = 0.0
                 v_pred = (x1_pred - xt) / (1 - t).clamp_min(0.05)
                 fm_loss = (v_target - v_pred)**2 # (B, C, H, W)
                 fm_loss = fm_loss.mean(dim=[1,2,3]).mean()
@@ -216,7 +229,7 @@ def main():
             accelerator.backward(loss)
             optimizer.step()
             scheduler.step()
-            update_ema(ema, accelerator.unwrap_model(model))
+            update_ema(ema, accelerator.unwrap_model(model), decay=cfg.ema_decay)
             train_steps += 1
             log_steps += 1
             running_loss += loss.detach()  # only compare the standard FM loss.

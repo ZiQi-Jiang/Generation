@@ -130,6 +130,7 @@ def main(sample_args):
     if accelerator.is_main_process:
         os.makedirs(sample_dir, exist_ok=True)
         os.makedirs(os.path.join(sample_dir, "images"), exist_ok=True)
+    accelerator.wait_for_everyone()
     sys.stdout = SimpleLogger(os.path.join(sample_dir, "log.txt"))
 
     torch.backends.cudnn.benchmark = True
@@ -159,7 +160,7 @@ def main(sample_args):
     accelerator.print(f"===== Sampling Settings =====\n{sample_args_str}\n===========================")
     
     # load model and checkpoint
-    model = JiT_models[train_cfg.model_type](input_size=train_cfg.image_size, in_channels=3, num_classes=train_cfg.num_classes, mlp_ratio=4, use_repa = train_cfg.use_repa, repa_depth=train_cfg.repa_depth)
+    model = JiT_models[train_cfg.model_type](input_size=train_cfg.image_size, in_channels=3, num_classes=train_cfg.num_classes, mlp_ratio=4, reg_type = train_cfg.reg_type, reg_depth=train_cfg.reg_depth)
 
     model.load_state_dict(state_dict['ema'])
     # new_state_dict = {}

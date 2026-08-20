@@ -136,7 +136,7 @@ class JiTBlock(nn.Module):
         return x
 
 class JiT(nn.Module):
-    def __init__(self, input_size, mlp_ratio, in_channels, num_classes,  depth, hidden_size,  num_heads, bottleneck_dim, in_context_len, in_context_start, patch_size,reg_type=None, repa_depth=4):
+    def __init__(self, input_size, mlp_ratio, in_channels, num_classes,  depth, hidden_size,  num_heads, bottleneck_dim, in_context_len, in_context_start, patch_size,reg_type=None, reg_depth=4):
         super().__init__()
         self.input_size = input_size
         self.patch_size = patch_size
@@ -149,7 +149,7 @@ class JiT(nn.Module):
         self.in_context_len = in_context_len
         self.in_context_start = in_context_start
         self.reg_type = reg_type
-        self.repa_depth = repa_depth
+        self.reg_depth = reg_depth
 
         # time and condition embedder
         self.t_embedder = TimestepEmbedder(hidden_size=hidden_size)
@@ -179,8 +179,9 @@ class JiT(nn.Module):
             JiTBlock(hidden_size=hidden_size, num_heads=num_heads, mlp_ration=mlp_ratio) for i in range(depth)
         ])
 
+        assert reg_type in ['repa', 'irepa', 'disperse', 'ig', 'sra', 'none']
         if reg_type == 'repa':
-            # self.repa_depth = 8 if  depth >=24 else 4
+            # self.reg_depth = 8 if  depth >=24 else 4
             self.repa_projector = nn.Sequential(
             nn.Linear(hidden_size, 2048), nn.SiLU(),
             nn.Linear(2048, 2048), nn.SiLU(),
@@ -189,10 +190,13 @@ class JiT(nn.Module):
         elif reg_type == 'irepa':
             self.repa_projector = nn.Conv2d(in_channels=hidden_size, out_channels=768, kernel_size=3, stride=1, padding=1)
         elif reg_type == 'disperse':
+            self.reg_depth = depth
             pass
         elif reg_type == 'ig': # internal guidance
             self.final_layer_xr = FinalLayer(hidden_size=hidden_size, patch_size=patch_size, out_channels=in_channels)
 
+        elif reg_type == 'sra': # SRA:
+            self.final_layer_xr = FinalLayer(hidden_size=hidden_size,patch_size=patch_size, out_channels = in_channels)
 
         self.final_layer = FinalLayer(hidden_size=hidden_size, patch_size=patch_size, out_channels=in_channels)
 
@@ -249,7 +253,7 @@ class JiT(nn.Module):
         x = rearrange(x, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=h, w=w, p1 = self.patch_size, p2 = self.patch_size)
         return x
 
-    def forward(self, x, t, y):
+    def forward(self, x, t, y, only_features=False):
         # x: (B, C, H, W)
         # t: (B, )float
         # y: (B,) int
@@ -271,7 +275,7 @@ class JiT(nn.Module):
             x = block(x, c, feat_rope=self.feat_rope if i < self.in_context_start else self.feat_rope_incontext)
             
             # repa
-            if self.training and self.reg_type and (i + 1) == self.repa_depth:
+            if self.reg_type != "none" and (i + 1) == self.reg_depth:
                 x_no_incontext = x[:, self.in_context_len:,:] if i >= self.in_context_start else x # (B, N, D)
 
                 if self.reg_type == 'repa': #linear, direct forward
@@ -292,8 +296,14 @@ class JiT(nn.Module):
                 elif self.reg_type == 'disperse':
                     h = x_no_incontext # (B, N, D)
                 elif self.reg_type == 'ig':
-                    h = self.final_layer_xr(x_no_incontext)
+                    h = self.final_layer_xr(x_no_incontext, c)
                     h = self.unpatchify(h) # (B, C, H, W)
+
+                elif self.reg_type == 'sra':
+                    if self.training: # for stu
+                        h = self.final_layer_xr(x_no_incontext, c)
+                    else:
+                        h = x_no_incontext # for teacher
 
 
 
@@ -301,8 +311,10 @@ class JiT(nn.Module):
         x = self.final_layer(x, c) # (B, N, D)
         output = self.unpatchify(x) # (B, C, H, W)
 
-        if self.reg_type and self.training:
+        if self.reg_type != "none" and self.training:
             return output, h 
+        elif only_features:
+            return h
         else:
             return output
     
