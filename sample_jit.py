@@ -1,6 +1,6 @@
 # used to sample images for metrics.
 from config import DefaultConfig,  SimpleLogger
-from models.jit import JiT_models
+from models.jit_clean import JiT_models
 import os, sys, argparse,datetime
 import torch
 from accelerate import Accelerator
@@ -15,7 +15,7 @@ import torch.distributed as dist
 from PIL import Image
 import torch_fidelity
 from einops import repeat
-from evaluator import Evaluator, evalutate
+# from evaluator import Evaluator, evalutate
 import cv2
 
 @torch.no_grad()
@@ -99,10 +99,6 @@ def sample(model,  accelerator, sample_dir, sample_args,train_cfg):
         accelerator.print(f"[Path:{sample_dir}] | Generated {end_idx}/{sample_args.num_samples} samples so far.\n Sampling took {time() - start_time:.2f} seconds for the current batch.")
 
     accelerator.wait_for_everyone()
-    accelerator.print(f"Finished generating {samples_per_gpu* accelerator.num_processes} samples. Saved to {sample_dir}/")
-    if accelerator.is_main_process:
-        create_npz_from_sample_folder(sample_dir, num=sample_args.num_samples)
-    accelerator.print(f"Finished creating .npz file from samples")
 
 def create_npz_from_sample_folder(sample_dir, num=50_000):
     """
@@ -177,6 +173,7 @@ def main(sample_args):
     set_seed(sample_args.sample_seed, device_specific=True)
     sample(model, accelerator, sample_dir, sample_args, train_cfg)
 
+
     # evaluate FID,IS, sFID, Precision/Recall. 
     if train_cfg.image_size == 256:
         fid_statistics_file = './data/jit_in256_stats.npz'
@@ -199,11 +196,6 @@ def main(sample_args):
         )
         accelerator.print(f"FID: {metrics_dict['frechet_inception_distance']:.4f}, Inception Score: {metrics_dict['inception_score_mean']:.4f}")
 
-        # Evaluating using ADM suite.
-        evaluator = Evaluator(accelerator.device)
-        evalutate(evaluator = evaluator, ref_batch_path='./data/VIRTUAL_imagenet256_labeled.npz', sample_batch_path=f'{sample_dir}/generated_samples.npz')
-
-   
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sample from the trained model")
     parser.add_argument('--exp', type=str, default=None, help='Timestamp of the experiment to load (default, using JiT-B/16 trained on 1000 classes)')

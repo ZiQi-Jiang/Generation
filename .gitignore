@@ -100,3 +100,8 @@ demo/models/
 
 calculate_mean.py
 checkpoints
+
+src/*
+
+codex
+

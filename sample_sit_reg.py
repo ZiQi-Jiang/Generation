@@ -1,6 +1,7 @@
 # used to sample images for metrics.
 from config import DefaultConfig,  SimpleLogger
-from models.jit_token_t import JiT_models
+from models.lightning_sit import SiT_models
+from diffusers.models import AutoencoderKL
 import os, sys, argparse,datetime
 import torch
 from accelerate import Accelerator
@@ -22,15 +23,11 @@ import cv2
 def velocity_with_cfg(model, xt, y, t, sample_args, num_classes=1000):
     # xt: (B, 3, H, W)
     # y: (B,), xt: (B, 1, 1, 1)
-    # t: (b,1,1,1)
     # conditional
-    patch_size,image_size = model.patch_size, model.input_size
-    h, w = image_size // patch_size, image_size // patch_size
-    t_patch = repeat(t, 'b 1 1 1 -> b (h w)', h=h, w=w)
-    x1_cond = model(xt, t_patch, y)
+    x1_cond = model(xt, t.flatten(), y)
     v_cond = (x1_cond - xt) / (1 - t).clamp_min(sample_args.t_eps)
     #unconditionl
-    x1_uncond = model(xt, t_patch, torch.full_like(y, num_classes))
+    x1_uncond = model(xt, t.flatten(), torch.full_like(y, num_classes))
     v_uncond = (x1_uncond - xt) / (1.0 - t).clamp_min(sample_args.t_eps)
 
     low, high = sample_args.cfg_min, sample_args.cfg_max
@@ -57,7 +54,7 @@ def heun_step(model, xt, y, t, next_t, sample_args):
     return xt_next
 
 @torch.no_grad()
-def sample(model,  accelerator, sample_dir, sample_args,train_cfg):
+def sample(model,  vae, accelerator, sample_dir, sample_args,train_cfg):
     samples_per_gpu = math.ceil(sample_args.num_samples / accelerator.num_processes)
     accelerator.print(f"Generating  {sample_args.num_samples} samples in total \n{accelerator.num_processes} processes,{samples_per_gpu} samples per GPU.")
     accelerator.print(f"Mixed precision: {accelerator.mixed_precision}")
@@ -66,21 +63,21 @@ def sample(model,  accelerator, sample_dir, sample_args,train_cfg):
     class_labels_global = np.arange(0, num_class).repeat(sample_args.num_samples // num_class) #(50000,)
     class_labels_global = np.hstack([class_labels_global, np.zeros(50000)]) # assure the last step 
     num_steps = sample_args.num_samples // (sample_args.batch_size * accelerator.num_processes) + 1
+    latent_size = train_cfg.image_size // 8
     for i in range(num_steps + 1):
         accelerator.print(f'Generatino Step: {i}/{num_steps}')
         start_idx = accelerator.num_processes * sample_args.batch_size * i + sample_args.batch_size * accelerator.process_index
         end_idx = start_idx + sample_args.batch_size
 
-        with accelerator.autocast():
-        # with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+        # with accelerator.autocast():
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             start_time = time()
             y = class_labels_global[start_idx:end_idx]
             y = torch.Tensor(y).long().cuda()
-            z = torch.randn(sample_args.batch_size, 3, train_cfg.image_size, train_cfg.image_size, device=accelerator.device) * train_cfg.noise_scale
-            
-            t = torch.linspace(0,1.0, sample_args.sample_steps+1, device=accelerator.device) # ode: 0 to 1 
+            z = torch.randn(sample_args.batch_size, 4, latent_size, latent_size, device=accelerator.device) * train_cfg.noise_scale
+
+            t = torch.linspace(0,1.0, sample_args.sample_steps+1, device=accelerator.device) # ode: 0 to 1
             t = repeat(t, 'n -> n b 1 1 1', b = sample_args.batch_size)
-            
             x = z # init
 
             for idx in tqdm(range(sample_args.sample_steps-1)):
@@ -88,7 +85,7 @@ def sample(model,  accelerator, sample_dir, sample_args,train_cfg):
                 x = heun_step(accelerator.unwrap_model(model), x, y, t_cur, t_next,sample_args)
 
             samples = eluer_step(accelerator.unwrap_model(model), x, y, t[-2], t[-1],sample_args)
-
+        samples = vae.decode(samples / 0.18215).sample
      
         samples = (samples + 1)/2
         samples = samples.detach().cpu()
@@ -108,7 +105,6 @@ def sample(model,  accelerator, sample_dir, sample_args,train_cfg):
     # if accelerator.is_main_process:
     #     create_npz_from_sample_folder(sample_dir, num=sample_args.num_samples)
     # accelerator.print(f"Finished creating .npz file from samples")
-    
 
 def create_npz_from_sample_folder(sample_dir, num=50_000):
     """
@@ -129,14 +125,17 @@ def create_npz_from_sample_folder(sample_dir, num=50_000):
 
 def main(sample_args):
     accelerator = Accelerator(mixed_precision="bf16")
-    time_list = [datetime.datetime.now().strftime("%H%M%S")]
+    beijing_tz = datetime.timezone(datetime.timedelta(hours=8))  # UTC+8, Beijing time
+    timestamp = datetime.datetime.now(beijing_tz).strftime("%Y%m%d_%H%M%S")
+    time_list = [timestamp]
     broadcast_object_list(time_list, from_process=0)
-    
     sample_dir = os.path.join('samples', time_list[0])
     if accelerator.is_main_process:
         os.makedirs(sample_dir, exist_ok=True)
         os.makedirs(os.path.join(sample_dir, "images"), exist_ok=True)
-    sys.stdout = SimpleLogger(os.path.join(sample_dir, "log.txt"))
+        sys.stdout = SimpleLogger(os.path.join(sample_dir, "log.txt"))
+    accelerator.wait_for_everyone()
+
 
     torch.backends.cudnn.benchmark = True
     torch._dynamo.config.cache_size_limit = 128
@@ -152,12 +151,12 @@ def main(sample_args):
         state_dict = torch.load(ckpt_path, map_location='cpu')
     else: # load by hands.
         accelerator.print("Using default configuration for SiT-XL/2 trained on 1000 classes.")
-        train_cfg.model_type = 'JiT-B/16'
+        train_cfg.model_type = 'SiT-B/2'
         train_cfg.image_size = 256
         train_cfg.num_classes = 1000
         train_cfg.mlp_ratio = 4.0
         train_cfg.in_channels = 3
-        ckpt_path = './data/checkpoints/jit_b16_e600.pth'
+        ckpt_path = './data/checkpoints/sit_b2_e600.pth'
         state_dict = torch.load(ckpt_path, map_location='cpu')
     # print train cfg and sampling sample_args
     accelerator.print(train_cfg)
@@ -165,15 +164,24 @@ def main(sample_args):
     accelerator.print(f"===== Sampling Settings =====\n{sample_args_str}\n===========================")
     
     # load model and checkpoint
-    model = JiT_models[train_cfg.model_type](input_size=train_cfg.image_size, in_channels=3, num_classes=train_cfg.num_classes, mlp_ratio=4)
-
+    latent_size = train_cfg.image_size // 8
+    model = SiT_models[train_cfg.model_type](input_size=latent_size, num_classes=train_cfg.num_classes, mlp_ratio=4, reg_type = train_cfg.reg_type)
+    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(accelerator.device)
     model.load_state_dict(state_dict['ema'])
+    # new_state_dict = {}
+    # for k, v in state_dict['model_ema1'].items():
+    #     if k.startswith('net.'):
+    #         name = k[4:]
+    #     else:
+    #         name = k
+    #     new_state_dict[name] = v
+    # model.load_state_dict(new_state_dict)
     model.eval()
     model = accelerator.prepare(model)
 
     # start sampling sample_args.num_samples samples and save to sample_dir.
     set_seed(sample_args.sample_seed, device_specific=True)
-    sample(model, accelerator, sample_dir, sample_args, train_cfg)
+    sample(model,vae, accelerator, sample_dir, sample_args, train_cfg)
 
     # evaluate FID,IS, sFID, Precision/Recall. 
     if train_cfg.image_size == 256:

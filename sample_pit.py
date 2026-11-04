@@ -63,7 +63,7 @@ def sample(model,  accelerator, sample_dir, sample_args,train_cfg):
             t = repeat(t, 'n -> n b 1 1 1', b = sample_args.batch_size)
             x = z # init
             v_prev = None
-            for idx in tqdm(range(sample_args.sample_steps-1)):
+            for idx in tqdm(range(sample_args.sample_steps)):
                 t_cur, t_next = t[idx], t[idx+1] # (b,1,1,1)
                 v = velocity_with_cfg(accelerator.unwrap_model(model), x, y, t_cur, sample_args)
 

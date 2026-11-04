@@ -1,11 +1,88 @@
 import torch
 import torch.nn as nn
 import math
-from .utils import RMSNorm, VisionRotaryEmbeddingFast, get_2d_sincos_pos_embed, pixel_modulate, Attention
+from .utils import VisionRotaryEmbeddingFast, get_2d_sincos_pos_embed, pixel_modulate, RMSNorm
 from einops import rearrange
 import torch.nn.functional as F
 
-# Different from Finallayer in JiT/DiT, no modulation.
+
+class RMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.eps = eps
+
+    def forward(self, x):
+        x_fp32 = x.to(torch.float32)
+        rms = torch.rsqrt(x_fp32.pow(2).mean(dim=-1,keepdim=True) + self.eps)
+        res = x_fp32 * rms
+        # res = (res * self.weight).to(x.dtype)
+        res = res.to(x.dtype) * self.weight
+        return res
+    
+def precompute_freqs_cis_ex2d(dim, height, width, theta=10000.0, scale=1.0):
+    if isinstance(scale, float):
+        scale = (scale, scale)
+    x_pos = torch.linspace(0, width*scale[0], width)
+    y_pos = torch.linspace(0, height*scale[1], height)
+    y_pos, x_pos = torch.meshgrid(y_pos, x_pos, indexing="ij")
+    y_pos = y_pos.reshape(-1)
+    x_pos = x_pos.reshape(-1)
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 4)[: (dim // 4)].float() / dim)) # Hc/4
+    x_freqs = torch.outer(x_pos, freqs).float() # N Hc/4
+    y_freqs = torch.outer(y_pos, freqs).float() # N Hc/4
+    x_cis = torch.polar(torch.ones_like(x_freqs), x_freqs)
+    y_cis = torch.polar(torch.ones_like(y_freqs), y_freqs)
+    freqs_cis = torch.cat([x_cis.unsqueeze(dim=-1), y_cis.unsqueeze(dim=-1)], dim=-1) # N,Hc/4,2
+    freqs_cis = freqs_cis.reshape(height*width, -1)
+    return freqs_cis
+
+
+def apply_rotary_emb(xq,xk,freqs_cis) :
+    freqs_cis = freqs_cis[None, :, None, :]
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+class Attention(nn.Module):
+    def __init__( self, dim, num_heads, qkv_bias=False, qk_norm=True, attn_drop=0.0, proj_drop=0.0, norm_layer=RMSNorm) :
+        super().__init__()
+        assert dim % num_heads == 0, "dim should be divisible by num_heads"
+
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    @torch.compile
+    def forward(self, x, pos, mask=None) :
+        q, k, v = rearrange(self.qkv(x), 'b n (three heads d) -> three b n heads d', three=3, heads=self.num_heads)
+
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        q, k = apply_rotary_emb(q, k, freqs_cis=pos)
+
+        q = rearrange(q, 'b n heads d -> b heads n d')
+        k = rearrange(k, 'b n heads d -> b heads n d').contiguous()
+        v = rearrange(v, 'b n heads d -> b heads n d').contiguous()
+
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+
+        x = rearrange(x, 'B num_heads N d -> B N (num_heads d)') # (B, N, D)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
 
 class PiTFinalLayer(nn.Module):
     def __init__(self, hidden_dim, out_channels):
@@ -63,12 +140,12 @@ class TimestepEmbedder(nn.Module):
         self.frequency_embedding_size = frequency_embedding_size
     
     @staticmethod
-    def timestep_embedding(t,frequency_embedding_size, max_period=10000):
+    def timestep_embedding(t,frequency_embedding_size, max_period=10):
         """
         map  t:(B, ) to positional embedding  (B, freqency_embedding_size)
         """
         half = frequency_embedding_size // 2
-        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32)/half).to(t.device) #(half,)
+        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=t.device) / half) #(half,)
         args = t[:,None] * freqs[None]  #(B,half)
         embedding = torch.cat([torch.cos(args), torch.sin(args)],dim=-1)
         return embedding
@@ -105,7 +182,6 @@ class DiTBlock(nn.Module):
         self.attn = Attention(dim=hidden_dim,num_heads=num_heads,qkv_bias=False,qk_norm=True)
         self.mlp = SwiGLUFFN(hidden_dim=hidden_dim,mlp_hidden_dim=int(mlp_ration * hidden_dim))
         self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim * 6)
         )
 
@@ -119,7 +195,7 @@ class DiTBlock(nn.Module):
         # each is (B,1, D)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
 
-        x = x + gate_msa * self.attn(pixel_modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
+        x = x + gate_msa * self.attn(pixel_modulate(self.norm1(x), shift_msa, scale_msa), pos=feat_rope, mask=None)
         x = x + gate_mlp * self.mlp(pixel_modulate(self.norm2(x), shift_mlp, scale_mlp))
 
         return x
@@ -143,7 +219,6 @@ class PiTBlock(nn.Module):
         self.mlp = PiTMLP(dim=pixel_hidden_dim, mlp_ratio=mlp_ration)
 
         self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
             nn.Linear(hidden_dim, pixel_hidden_dim * 6 * patch_size * patch_size) # pixel-level control
         )
         
@@ -164,10 +239,10 @@ class PiTBlock(nn.Module):
 
 
         # attn part: norm1, modulate, attn(compress, attn expand in PiT)
-        x_pixel = pixel_modulate(self.norm1(x_pixel), shift_msa, scale_msa)  # (B*N, P2, d)
-        x_patch = rearrange(x_pixel, '(b n) p2 d -> b n (p2 d)', n=N)  # (B, N, patch_size*patch_size*d)
+        x_norm = pixel_modulate(self.norm1(x_pixel), shift_msa, scale_msa)  # (B*N, P2, d)
+        x_patch = rearrange(x_norm, '(b n) p2 d -> b n (p2 d)', n=N)  # (B, N, patch_size*patch_size*d)
         x_comp = self.compress_to_attn(x_patch)  # (B, N, attn_dim)
-        x_comp = self.attn(x_comp, rope=feat_rope)  # (B, N, attn_dim)
+        x_comp = self.attn(x_comp, pos=feat_rope, mask=None)  # (B, N, attn_dim)
         x_patch = self.expand_from_attn(x_comp)  # (B, N, patch_size*patch_size*d)
         res = rearrange(x_patch, 'b n (p2 d) -> (b n) p2 d', b=B, n=N, p2=P2, d=d)  # (B*N, P2, d)
         x_pixel = x_pixel + gate_msa * res # (B*N, P2, d)
@@ -200,12 +275,14 @@ class PiT(nn.Module):
             self.patch_depth = patch_depth
             self.pixel_depth = pixel_depth
             self.hidden_dim = hidden_dim
+            self.hidden_size = hidden_dim
             self.num_heads = num_heads
             self.pixel_hidden_dim = pixel_hidden_dim
             self.patch_size = patch_size
 
 
-            self.pixel_pos_embed = nn.Parameter(torch.zeros(1, self.input_size*self.input_size, pixel_hidden_dim), requires_grad=False)
+            # self.pixel_pos_embed = nn.Parameter(torch.zeros(1, self.input_size*self.input_size, pixel_hidden_dim), requires_grad=False)
+            self.register_buffer('pixel_pos_embed', torch.zeros(1, self.input_size*self.input_size, pixel_hidden_dim), persistent=False)  # (1, H*W, d)
             # Initialize (and freeze) pos_embed by sin-cos embedding:
             pixel_pos_embed = get_2d_sincos_pos_embed(self.pixel_hidden_dim, self.input_size)
             self.pixel_pos_embed.data.copy_(torch.from_numpy(pixel_pos_embed).float().unsqueeze(0))
@@ -216,14 +293,12 @@ class PiT(nn.Module):
             self.t_embedder = TimestepEmbedder(hidden_dim=hidden_dim)
             self.y_embedder = LabelEmbedder(num_classes=num_classes, hidden_dim=hidden_dim)
 
-
-            
             self.final_layer = PiTFinalLayer(hidden_dim=pixel_hidden_dim, out_channels=in_channels)
 
              # rope
-            half_rope_dim = hidden_dim // num_heads // 2
             seq_len = input_size // patch_size
-            self.feat_rope = VisionRotaryEmbeddingFast(half_dim=half_rope_dim, pt_seq_len=seq_len, num_cls_token=0)
+            # self.feat_rope = VisionRotaryEmbeddingFast(half_dim=half_rope_dim, pt_seq_len=seq_len, num_cls_token=0)
+            self.register_buffer("feat_rope", precompute_freqs_cis_ex2d(hidden_dim // num_heads, seq_len, seq_len), persistent=False)
 
             self.patch_blocks = nn.ModuleList([DiTBlock(hidden_dim=hidden_dim, num_heads=num_heads, mlp_ration=mlp_ratio) for _ in range(patch_depth)])
 
@@ -231,43 +306,6 @@ class PiT(nn.Module):
 
             self.pit_initialize_weights()
 
-        # def dit_initialize_weights(self):
-        #     # Initialize transformer layers:
-        #     def _basic_init(module):
-        #         if isinstance(module, nn.Linear):
-        #             torch.nn.init.xavier_uniform_(module.weight)
-        #             if module.bias is not None:
-        #                 nn.init.constant_(module.bias, 0)
-        #     # self.apply(_basic_init)
-
-        #     # Initialize (and freeze) pos_embed by sin-cos embedding:
-        #     pixel_pos_embed = get_2d_sincos_pos_embed(self.pixel_hidden_dim, self.input_size)
-        #     self.pixel_pos_embed.data.copy_(torch.from_numpy(pixel_pos_embed).float().unsqueeze(0))
-
-        #     # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
-        #     w1 = self.x_embedder.proj1.weight.data
-        #     nn.init.xavier_uniform_(w1.view([w1.shape[0], -1]))
-        #     w2 = self.x_embedder.proj2.weight.data
-        #     nn.init.xavier_uniform_(w2.view([w2.shape[0], -1]))
-        #     nn.init.constant_(self.x_embedder.proj2.bias, 0)
-
-        #     # Initialize label embedding table:
-        #     nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
-
-        #     nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-        #     nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
-
-        #     # Zero-out adaLN modulation layers:
-        #     for block in self.blocks:
-        #         nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-        #         nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-
-        #     # Zero-out output layers:
-        #     nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        #     nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-
-        #     nn.init.constant_(self.final_layer.linear.weight, 0)
-        #     nn.init.constant_(self.final_layer.linear.bias, 0)
         def pit_initialize_weights(self):
 
 
@@ -280,11 +318,11 @@ class PiT(nn.Module):
             nn.init.zeros_(self.final_layer.linear.weight)
             nn.init.zeros_(self.final_layer.linear.bias)
             for block in self.patch_blocks:
-                nn.init.zeros_(block.adaLN_modulation[1].weight)
-                nn.init.zeros_(block.adaLN_modulation[1].bias)
+                nn.init.zeros_(block.adaLN_modulation[0].weight)
+                nn.init.zeros_(block.adaLN_modulation[0].bias)
             for block in self.pixel_blocks:
-                nn.init.zeros_(block.adaLN_modulation[1].weight)
-                nn.init.zeros_(block.adaLN_modulation[1].bias)
+                nn.init.zeros_(block.adaLN_modulation[0].weight)
+                nn.init.zeros_(block.adaLN_modulation[0].bias)
 
         def forward(self, x, t, y, s=None):
             """
@@ -295,22 +333,22 @@ class PiT(nn.Module):
             """
             B,C,H,W = x.shape
 
-            x_patch = rearrange(x, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=self.patch_size, p2=self.patch_size)  # (B, N, patch_size*patch_size*C)
+            x_patch = rearrange(x, 'b c (h p1) (w p2) -> b (h w) (c p1 p2)', p1=self.patch_size, p2=self.patch_size)  # (B, N, patch_size*patch_size*C)
             t_emb = self.t_embedder(t).unsqueeze(1)  # (B, 1, D)
             y_emb = self.y_embedder(y).unsqueeze(1)  # (B, 1, D)
 
             if s is None: #DiT Encoder part : x_patch -> s
                 # typically, dit combine pathify and linear projection into Conv. PixelDiT sepereate them into two steps.
                 s = self.s_embedder(x_patch)  # (B, N, D)
-                c = t_emb + y_emb
+                c = F.silu(t_emb + y_emb)
                 for i in range(self.patch_depth):
                     s = self.patch_blocks[i](s, c, feat_rope=self.feat_rope)  # (B, N, D)
 
-                s = s + t_emb # (B, N, D)
+                s = F.silu(s + t_emb) # (B, N, D)
             N, D = s.shape[1], s.shape[2]
 
             # pachify x
-            x_pixel = rearrange(x, 'b c h w -> b h w c')
+            x_pixel = rearrange(x, 'b c h w -> b h w c').contiguous()  # (B, H, W, C)
             pixel_pos_embed = rearrange(self.pixel_pos_embed, '1 (h w) d -> 1 h w d', h=H, w=W)  # (1, H, W, d)
             x_pixel = self.x_embedder(x_pixel)  # (B, H, W, d)
 

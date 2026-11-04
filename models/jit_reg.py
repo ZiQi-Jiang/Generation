@@ -6,6 +6,18 @@ from einops import rearrange, repeat
 from .utils import *
 
 
+class SRAHead(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.linear1 = nn.Linear(in_dim, in_dim+out_dim)
+        self.linear2 = nn.Linear(in_dim+out_dim, out_dim)
+        self.act = nn.SiLU()
+    def forward(self, x):
+        x=self.linear1(x)
+        x=self.linear2(self.act(x))
+        return x
+
+
 class BottleneckPatchEmbed(nn.Module):
     """
     Patchify image to token. (B, 3, H, W) => (B, num_patches, p*p*3)
@@ -120,7 +132,8 @@ class JiTBlock(nn.Module):
             nn.Linear(hidden_size, hidden_size * 6)
         )
     
-    @torch.compile
+    # @torch.compile
+    @torch.compile(dynamic=False)
     def forward(self, x, c, feat_rope=None):
         """
         x: (B, N, D)
@@ -136,7 +149,7 @@ class JiTBlock(nn.Module):
         return x
 
 class JiT(nn.Module):
-    def __init__(self, input_size, mlp_ratio, in_channels, num_classes,  depth, hidden_size,  num_heads, bottleneck_dim, in_context_len, in_context_start, patch_size,reg_type=None, reg_depth=4):
+    def __init__(self, input_size, mlp_ratio, in_channels, num_classes,  depth, hidden_size,  num_heads, bottleneck_dim, in_context_len, in_context_start, patch_size,reg_type, reg_mask_ratio=0.2):
         super().__init__()
         self.input_size = input_size
         self.patch_size = patch_size
@@ -149,8 +162,7 @@ class JiT(nn.Module):
         self.in_context_len = in_context_len
         self.in_context_start = in_context_start
         self.reg_type = reg_type
-        self.reg_depth = reg_depth
-
+        self.reg_mask_ratio= reg_mask_ratio
         # time and condition embedder
         self.t_embedder = TimestepEmbedder(hidden_size=hidden_size)
         self.y_embedder = LabelEmbedder(num_classes=num_classes, hidden_size=hidden_size)
@@ -179,7 +191,7 @@ class JiT(nn.Module):
             JiTBlock(hidden_size=hidden_size, num_heads=num_heads, mlp_ration=mlp_ratio) for i in range(depth)
         ])
 
-        assert reg_type in ['repa', 'irepa', 'disperse', 'ig', 'sra', 'none']
+        assert reg_type in ['repa', 'irepa', 'disperse', 'ig', 'sra', 'none', 'sd-dit']
         if reg_type == 'repa':
             # self.reg_depth = 8 if  depth >=24 else 4
             self.repa_projector = nn.Sequential(
@@ -190,13 +202,21 @@ class JiT(nn.Module):
         elif reg_type == 'irepa':
             self.repa_projector = nn.Conv2d(in_channels=hidden_size, out_channels=768, kernel_size=3, stride=1, padding=1)
         elif reg_type == 'disperse':
-            self.reg_depth = depth
             pass
         elif reg_type == 'ig': # internal guidance
             self.final_layer_xr = FinalLayer(hidden_size=hidden_size, patch_size=patch_size, out_channels=in_channels)
 
         elif reg_type == 'sra': # SRA:
-            self.final_layer_xr = FinalLayer(hidden_size=hidden_size,patch_size=patch_size, out_channels = in_channels)
+            # self.final_layer_xr = FinalLayer(hidden_size=hidden_size,patch_size=patch_size, out_channels = in_channels)
+            self.final_layer_xr = SRAHead(in_dim=hidden_size, out_dim=hidden_size)
+
+        elif reg_type == 'sd-dit': # SD-DiT:
+            self.K = 8192 # dino, number of prototype.
+            self.register_buffer("center_patch", torch.zeros(1,1,self.K)) # Centering in DINO
+            self.m_p = 0.9 # moving average of patch centern
+            self.sddit_projector = DINOPatchHead(hidden_size, self.K)
+            self.feat_rope= None # Currently, we do not use ROPE
+            self.feat_rope_incontext = None
 
         self.final_layer = FinalLayer(hidden_size=hidden_size, patch_size=patch_size, out_channels=in_channels)
 
@@ -253,18 +273,23 @@ class JiT(nn.Module):
         x = rearrange(x, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=h, w=w, p1 = self.patch_size, p2 = self.patch_size)
         return x
 
-    def forward(self, x, t, y, only_features=False):
+    def forward_with_features(self, x, t, y, depth):
         # x: (B, C, H, W)
         # t: (B, )float
         # y: (B,) int
         # output: (B, C, H, W)
-
+        is_student = (self.training == True)
         t_emb = self.t_embedder(t) # (B,D)
         y_emb = self.y_embedder(y) # (B,D)
         c = t_emb + y_emb
 
         x = self.x_embedder(x) # (B,N,D), bottleck layer that will compress information.
         x += self.pos_embed
+        B,N,D = x.shape
+
+        if self.reg_type == 'sd-dit' and is_student: # for sd dit, only mask student input.
+                visible, invisible, ids_restore, ids_keep = random_masking(x, self.reg_mask_ratio)
+                x = visible
 
         for i, block in enumerate(self.blocks):
             if  self.in_context_len > 0 and i == self.in_context_start:
@@ -275,7 +300,7 @@ class JiT(nn.Module):
             x = block(x, c, feat_rope=self.feat_rope if i < self.in_context_start else self.feat_rope_incontext)
             
             # repa
-            if self.reg_type != "none" and (i + 1) == self.reg_depth:
+            if (i + 1) == depth:
                 x_no_incontext = x[:, self.in_context_len:,:] if i >= self.in_context_start else x # (B, N, D)
 
                 if self.reg_type == 'repa': #linear, direct forward
@@ -300,26 +325,73 @@ class JiT(nn.Module):
                     h = self.unpatchify(h) # (B, C, H, W)
 
                 elif self.reg_type == 'sra':
-                    if self.training: # for stu
-                        h = self.final_layer_xr(x_no_incontext, c)
+                    if is_student: # for stu
+                        h = self.final_layer_xr(x_no_incontext)
                     else:
                         h = x_no_incontext # for teacher
 
+                elif self.reg_type == 'sd-dit':
+                    n_context = self.in_context_len if i >=self.in_context_start else 0
+                    context_tokens, patch_tokens = x[:, :n_context, :], x[:, n_context:,:]
 
+                    h = self.sddit_projector(patch_tokens) #[B,N*(1-mask_ratio), K]
+
+                    if is_student:
+                        all_patches = torch.cat([patch_tokens, invisible], dim=1)
+
+                        # all_tokens = torch.cat([x, invisible],dim=1) #[B,N,D]
+                        ids_restore = repeat(ids_restore, 'b n -> b n d', d = D)
+                        restored_patches = torch.gather(all_patches, dim=1, index=ids_restore)
+                        x = torch.cat([context_tokens, restored_patches],dim=1)
+                        # x = torch.gather(all_tokens, dim=1, index=ids_restore)
 
         x = x[:, self.in_context_len:,:] # back to (B, N, D)
         x = self.final_layer(x, c) # (B, N, D)
         output = self.unpatchify(x) # (B, C, H, W)
 
-        if self.reg_type != "none" and self.training:
-            return output, h 
-        elif only_features:
-            return h
+        if self.reg_type == 'sd-dit':
+            if is_student:
+                return output, h, ids_keep
+            else:
+                return output, h
         else:
-            return output
+            return output, h 
+    
+
+    def forward(self, x, t, y, depth=None):
+        # x: (B, C, H, W)
+        # t: (B, )float
+        # y: (B,) int
+        # output: (B, C, H, W)
+        if depth is not None:
+            return self.forward_with_features(x, t, y, depth)
+
+        t_emb = self.t_embedder(t) # (B,D)
+        y_emb = self.y_embedder(y) # (B,D)
+        c = t_emb + y_emb
+
+        x = self.x_embedder(x) # (B,N,D), bottleck layer that will compress information.
+        x += self.pos_embed
+
+        for i, block in enumerate(self.blocks):
+            if  self.in_context_len > 0 and i == self.in_context_start:
+                # decouple the in context tokens into 2 parts: label embed and a residual(pos emb).
+                in_context_tokens = repeat(y_emb, 'b d -> b l d', l = self.in_context_len)
+                in_context_tokens = in_context_tokens +  self.in_context_posemb 
+                x = torch.cat([in_context_tokens, x],dim=1) # (B, N+L, D)
+            x = block(x, c, feat_rope=self.feat_rope if i < self.in_context_start else self.feat_rope_incontext)
+
+
+        x = x[:, self.in_context_len:,:] # back to (B, N, D)
+        x = self.final_layer(x, c) # (B, N, D)
+        output = self.unpatchify(x) # (B, C, H, W
+        return output
     
 
 
+def JiT_S_16(**kwargs):
+    return JiT(depth=12, hidden_size=384, num_heads=6, 
+                bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs)
 
 def JiT_B_16(**kwargs):
     return JiT(depth=12, hidden_size=768, num_heads=12,
@@ -351,6 +423,7 @@ def JiT_H_32(**kwargs):
                bottleneck_dim=256, in_context_len=32, in_context_start=10, patch_size=32, **kwargs)
 
 JiT_models = {
+    'JiT-S/16': JiT_S_16,
     'JiT-B/16': JiT_B_16,
     'JiT-B/32': JiT_B_32,
     'JiT-L/16': JiT_L_16,
@@ -359,3 +432,6 @@ JiT_models = {
     'JiT-H/32': JiT_H_32,
     'JiT-B/16_no_incontext': JiT_B_16_no_incontext
 }
+
+# def SiT_S_2(**kwargs):
+    # return SiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)

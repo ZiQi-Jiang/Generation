@@ -5,6 +5,29 @@ import numpy as np
 import math
 from einops import rearrange, repeat
 from collections import OrderedDict
+from PIL import Image
+
+def center_crop_arr(pil_image, image_size):
+    """
+    Center cropping implementation from ADM.
+    https://github.com/openai/guided-diffusion/blob/8fb3ad9197f16bbc40620447b2742e13458d2831/guided_diffusion/image_datasets.py#L126
+    """
+    while min(*pil_image.size) >= 2 * image_size:
+        pil_image = pil_image.resize(
+            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
+        )
+
+    scale = image_size / min(*pil_image.size)
+    pil_image = pil_image.resize(
+        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
+    )
+
+    w,h = pil_image.size
+    crop_x = (w - image_size) // 2
+    crop_y = (h - image_size) // 2
+    # return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
+    return pil_image.crop((crop_x, crop_y, crop_x+image_size, crop_y+image_size))
+
 
 
 @torch.no_grad()
@@ -20,6 +43,45 @@ def update_ema(ema_model, model, decay=0.9999):
 
 
 
+def dino_cross_entropy(tea, stu, center, tau_stu, tau_tea):
+    """
+    tea, stu: [B, L, K]
+    center: [1,1,K]
+    """
+    tea = tea.detach()
+    p_t = F.softmax((tea-center)/tau_tea, dim=-1) #[B,L,K]
+
+    log_p_s = F.log_softmax(stu/tau_stu, dim=-1)
+
+    loss = - (p_t * log_p_s).sum(dim=-1).mean()
+
+    return loss
+
+
+def random_masking(x, mask_ratio):
+    """
+    x: [B, N, D]
+    mask_ratio: (0,1)
+    return: visible tokens, invisible tokens, id_restore, mask
+    """
+    B,N,D = x.shape
+    len_keep =  int(N * (1-mask_ratio))
+
+    noise = torch.rand(B,N, device=x.device)
+    ids_shuffle = torch.argsort(noise,dim=1)
+    ids_restore = torch.argsort(ids_shuffle,dim=1) #[B,N]
+    ids_keep, ids_mask = ids_shuffle[:, :len_keep], ids_shuffle[:, len_keep:] #[B,N]
+
+    ids = repeat(ids_shuffle, 'b n -> b n d', d=D)
+
+    visible = torch.gather(x,dim=1, index=ids[:,:len_keep]) #[B, N*(1-mask_ratio), D]
+    in_visible = torch.gather(x, dim=1, index =ids[:,len_keep:]) #[B, N * mask_ratio, D]
+
+    mask = torch.ones(B,N, device=x.device)
+    mask[:, :len_keep] = 0
+    mask = torch.gather(mask, dim=1, index=ids_restore) #[B,N]
+
+    return visible, in_visible, ids_restore, ids_keep
 
 # Actually, no weight decay in JiT.
 def add_weight_decay(model, weight_decay=0, skip_list=()):
@@ -157,7 +219,7 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias = qkv_bias)
         self.proj = nn.Linear(dim, dim)
     
-    def forward(self,x, rope):
+    def forward(self,x, rope=None):
         # x: (B, N, D)
         q, k, v = self.qkv(x).chunk(3,dim=-1) # [B,N,D]
         q = rearrange(q, 'B N (heads d) -> B heads N d', heads = self.num_heads)
@@ -165,21 +227,23 @@ class Attention(nn.Module):
         v = rearrange(v, 'B N (heads d) -> B heads N d', heads = self.num_heads)
         
         q, k =  self.q_norm(q), self.k_norm(k)
-        q, k = rope(q), rope(k) #[B, num_heads, N, D//num_heads]
+
+        if rope is not None:
+            q, k = rope(q), rope(k) #[B, num_heads, N, D//num_heads]
 
         # Option 1: vanilla attention
-        attn_bias = q.new_zeros(q.size(0), 1, q.size(2), k.size(2))
-        scale_factor = 1/ math.sqrt(q.size(-1))
+        # attn_bias = q.new_zeros(q.size(0), 1, q.size(2), k.size(2))
+        # scale_factor = 1/ math.sqrt(q.size(-1))
 
-        with torch.cuda.amp.autocast(enabled=False):
-            attn_weight = q.float() @ k.float().transpose(-2,-1) * scale_factor # [B, num_heads, N, N]
+        # with torch.cuda.amp.autocast(enabled=False):
+        #     attn_weight = q.float() @ k.float().transpose(-2,-1) * scale_factor # [B, num_heads, N, N]
         
-        attn_weight += attn_bias
-        attn_weight = torch.softmax(attn_weight, dim=-1)
-        x = attn_weight @ v # [B, num_heads, N, d]
+        # attn_weight += attn_bias
+        # attn_weight = torch.softmax(attn_weight, dim=-1)
+        # x = attn_weight @ v # [B, num_heads, N, d]
 
         # Option 2: Flash Attention (automatically picks optimal backend: FlashAttention-2, Memory-Efficient, or fallback)
-        # x = F.scaled_dot_product_attention(q, k, v)
+        x = F.scaled_dot_product_attention(q, k, v)
         x = rearrange(x, 'B num_heads N d -> B N (num_heads d)') # (B, N, D)
         x = self.proj(x)
         return x
@@ -217,3 +281,25 @@ class VisionRotaryEmbeddingFast(nn.Module):
             self.freqs_sin = freqs.sin().view(-1, freqs.shape[-1]).cuda()
 
     def forward(self, x): return  x * self.freqs_cos + rotate_half(x) * self.freqs_sin
+
+
+class DINOPatchHead(nn.Module):
+    def __init__(self, in_dim, out_dim=8192):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, 2048),
+            nn.GELU(),
+            nn.Linear(2048, 2048),
+            nn.GELU(),
+            nn.Linear(2048, 256),
+        )
+
+        self.prototypes = nn.Parameter(torch.empty(out_dim, 256))
+        nn.init.xavier_uniform_(self.prototypes)
+
+
+    def forward(self, tokens):
+        emb = self.mlp(tokens)
+        emb = F.normalize(emb.float(), p=2, dim=-1, eps=1e-6)
+        w = F.normalize(self.prototypes, p=2, dim=-1)
+        return  emb @ w.t()

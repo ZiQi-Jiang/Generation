@@ -174,6 +174,7 @@ def main():
             with accelerator.autocast():
                 
                 # logit-normal time sampling
+                # cfg.P_std = 1, cfg.P_mean = 0
                 z = torch.randn(x1.shape[0], device=x1.device) * cfg.P_std + cfg.P_mean
                 t = torch.sigmoid(z)
                 # t = torch.rand((x1.shape[0],)).to(accelerator.device) # [B_local, ]
@@ -188,7 +189,7 @@ def main():
                     v_pred, h = model(xt, t.flatten(), y)
                     h, repa_x1 = F.normalize(h, dim=-1), F.normalize(repa_x1, dim=-1) #[B, T, D]
                     reg_loss = - (h * repa_x1).sum(dim=-1).mean()
-                    reg_lam = 0.5
+                    reg_lam = cfg.reg_lam
                 else:
                     v_pred = model(xt, t.flatten(), y)
                     reg_loss = 0.

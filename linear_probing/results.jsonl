@@ -1,0 +1,9 @@
+{"model_type": "JiT-H/16", "t": 1.0, "layer_idx": 0, "best_val_top1": 0.0607, "epochs": 100, "local_batch_size": 128, "blr": 0.001, "image_size": 256, "feature_dim": 1280}
+{"model_type": "JiT-H/16", "t": 1.0, "layer_idx": 4, "best_val_top1": 0.15066, "epochs": 100, "local_batch_size": 128, "blr": 0.001, "image_size": 256, "feature_dim": 1280}
+{"model_type": "JiT-H/16", "t": 1.0, "layer_idx": 8, "best_val_top1": 0.20526, "epochs": 100, "local_batch_size": 128, "blr": 0.001, "image_size": 256, "feature_dim": 1280}
+{"model_type": "JiT-H/16", "t": 1.0, "layer_idx": 12, "best_val_top1": 0.21906, "epochs": 100, "local_batch_size": 128, "blr": 0.001, "image_size": 256, "feature_dim": 1280}
+{"model_type": "JiT-H/16", "t": 1.0, "layer_idx": 16, "best_val_top1": 0.23946, "epochs": 100, "local_batch_size": 128, "blr": 0.001, "image_size": 256, "feature_dim": 1280}
+{"model_type": "JiT-H/16", "t": 1.0, "layer_idx": 18, "best_val_top1": 0.2591, "epochs": 100, "local_batch_size": 128, "blr": 0.001, "image_size": 256, "feature_dim": 1280}
+{"model_type": "JiT-H/16", "t": 1.0, "layer_idx": 24, "best_val_top1": 0.3389, "epochs": 100, "local_batch_size": 128, "blr": 0.001, "image_size": 256, "feature_dim": 1280}
+{"model_type": "JiT-H/16", "t": 1.0, "layer_idx": 28, "best_val_top1": 0.26286, "epochs": 100, "local_batch_size": 128, "blr": 0.001, "image_size": 256, "feature_dim": 1280}
+{"model_type": "JiT-H/16", "t": 1.0, "layer_idx": 31, "best_val_top1": 0.19728, "epochs": 100, "local_batch_size": 128, "blr": 0.001, "image_size": 256, "feature_dim": 1280}

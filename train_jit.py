@@ -4,20 +4,20 @@ import sys
 import os
 from config import DefaultConfig, SimpleLogger
 from copy import deepcopy
-from torchvision.transforms import Compose, Lambda, RandomHorizontalFlip, ToTensor, PILToTensor
+from torchvision.transforms import Compose, Lambda, RandomHorizontalFlip, ToTensor, PILToTensor, Normalize
 from torchvision.datasets import ImageFolder
 import torch.utils.data as tud
 from time import time
 from einops import rearrange
 from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import set_seed, broadcast_object_list
-from models.jit import JiT_models
+from models.jit_clean import JiT_models
 import numpy as np
 from PIL import Image
 import timm
 from collections import OrderedDict
-from accelerate.utils import TorchDynamoPlugin
-
+from torch.func import jvp
+from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 @torch.no_grad()
 def update_ema(ema_model, model, decay=0.9999):
@@ -45,10 +45,11 @@ def center_crop_arr(pil_image, image_size):
         tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
     )
 
-    arr = np.array(pil_image)
-    crop_y = (arr.shape[0] - image_size) // 2
-    crop_x = (arr.shape[1] - image_size) // 2
-    return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
+    w,h = pil_image.size
+    crop_x = (w - image_size) // 2
+    crop_y = (h - image_size) // 2
+    # return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
+    return pil_image.crop((crop_x, crop_y, crop_x+image_size, crop_y+image_size))
 
 def main():
     # set up config
@@ -93,7 +94,7 @@ def main():
     dataset = ImageFolder(cfg.data_path, transform=transform)
 
     # TODO:
-    dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=12, pin_memory=True, drop_last=True)
+    dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=8, pin_memory=True, drop_last=True)
 
     # TODO: proj_drop 
     model = JiT_models[cfg.model_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
@@ -117,7 +118,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lr_lambda)
 
     # model = torch.compile(model)
-    dataloader, model, optimizer, = accelerator.prepare(dataloader, model,  optimizer)
+    dataloader, model, optimizer, scheduler= accelerator.prepare(dataloader, model,  optimizer,scheduler)
 
     accelerator.print(f"Num proccess: {accelerator.num_processes}; Mixed precision: {accelerator.mixed_precision}")
     accelerator.print(f"Dataset size: {len(dataset)} images")
@@ -132,17 +133,13 @@ def main():
     # start training
     update_ema(ema, accelerator.unwrap_model(model), decay=0)  # Initialize EMA with the same weights as the model
 
-
     model.train() # important, train(). => class dropout.
     ema.eval()
-    start_epoch,train_steps, log_steps, running_loss = 1,0,0,0
+    start_epoch,train_steps, log_steps, running_loss, running_reg_loss, running_fm_loss = 1,0,0,0,0,0
     train_start_time = time()
-    # if cfg.resume_exp is not None: # resume training
-    #     accelerator.print(f"Resuming from experiment: {cfg.resume_exp}, epoch: {cfg.resume_epoch:03d}")
-    #     ckpt_path = os.path.join('exp',cfg.resume_exp, f'epochs_{cfg.resume_epoch:03d}')
-    #     accelerator.load_state(ckpt_path) 
-    #     start_epoch = cfg.resume_epoch + 1
     rng = torch.Generator(accelerator.device).manual_seed(42) # for negative sampling.
+
+
 
     for epoch in range(start_epoch, cfg.epochs+1):
         accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch}/{cfg.epochs}...")
@@ -159,7 +156,6 @@ def main():
             drop_ids = torch.rand(y.shape[0], device=y.device) < 0.1
             y =  torch.where(drop_ids, cfg.num_classes, y)
 
-
             with accelerator.autocast():
                 # logit-normal time sampling
                 z = torch.randn(x1.shape[0], device=x1.device) * cfg.P_std + cfg.P_mean
@@ -171,53 +167,40 @@ def main():
                 x0 = torch.randn_like(x1) * cfg.noise_scale
                 xt = x0 * (1 - t) + x1 * t
                 v_target = (x1 - xt) / (1-t).clamp_min(0.05)
-                if cfg.flow_type =='standard':
-                    neg_x0, neg_x1 = None, None
-                elif cfg.flow_type == 'neg':
-                    global_x0 = accelerator.gather(x0) #[B_global, C, H/8, W/8]
-                    global_x1 = accelerator.gather(x1) 
-                    global_xt = accelerator.gather(xt) 
-                    global_t = accelerator.gather(t)
-                    global_bsz = global_xt.shape[0]
-                    global_idx = torch.arange(global_bsz,device=global_xt.device)
-                    random_offset = torch.randint(1, global_bsz,(global_bsz,), generator=rng, device=global_x1.device)
-                    global_neg_idx = (global_idx + random_offset) % global_bsz #[B_global, ]
-                    rank,local_bsz = accelerator.process_index, xt.shape[0]
-                    local_neg_idx = global_neg_idx[rank * local_bsz : (rank + 1) * local_bsz]
-                    neg_x1 = global_x1[local_neg_idx] #[B_local, C, H/8, W/8]
-                    neg_x0 = global_x0[local_neg_idx] #[B_local, C, H/8, W/8]
-                    neg_xt = global_xt[local_neg_idx]
-                    neg_t = global_t[local_neg_idx]
-                    neg_features = (t * neg_x1 + (1-t) * neg_x0) - (t * x1 + (1-t) * x0)
-                    # neg_velocity = (neg_x1 - neg_x0) - (x1 - x0)
-                    neg_velocity = (neg_x1 - neg_xt) / (1-neg_t).clamp_min(0.05)
 
-                xt = xt - cfg.lam * t * (1 - t) * neg_features
-                v_target = v_target - cfg.lam * (1 - 2*t) * neg_features - cfg.lam * t * (1 - t) * neg_velocity
                 x1_pred = model(xt, t.flatten(), y)
                 v_pred = (x1_pred - xt) / (1 - t).clamp_min(0.05)
-                loss = (v_target - v_pred)**2 # (B, C, H, W)
-                loss = loss.mean(dim=[1,2,3]).mean()
+                fm_loss = (v_target - v_pred)**2 # (B, C, H, W)
+                fm_loss = fm_loss.mean(dim=[1,2,3]).mean()
+
+
+                loss = fm_loss 
 
             optimizer.zero_grad()
             accelerator.backward(loss)
             optimizer.step()
             scheduler.step()
-            update_ema(ema, accelerator.unwrap_model(model))
+            update_ema(ema, accelerator.unwrap_model(model), decay=cfg.ema_decay)
             train_steps += 1
             log_steps += 1
+            running_fm_loss += fm_loss.detach()
+            # running_reg_loss += reg_loss.detach()
             running_loss += loss.detach()  # only compare the standard FM loss.
             if train_steps % cfg.log_step_freq == 0 :
                 running_loss = accelerator.reduce(running_loss.detach(), reduction="mean")
+                running_fm_loss = accelerator.reduce(running_fm_loss.detach(), reduction="mean")
                 avg_loss = running_loss / log_steps
+                avg_fm_loss = running_fm_loss / log_steps
                 elapsed = time() - train_start_time
                 accelerator.print(
-                    f"Step {train_steps}, Avg Loss: {avg_loss:.4f}, Avg_sample_t:{t.mean().item():.4f} " +
+                    f"Step {train_steps}, Avg Loss: {avg_loss:.4f}, Avg FM Loss:{avg_fm_loss:.4f}, Avg_sample_t:{t.mean().item():.4f} " +
                     f"Elapsed: {elapsed:.1f}s",
                     
                     flush=True,
                 )
                 running_loss = 0
+                running_fm_loss = 0
+                running_reg_loss = 0
                 log_steps = 0
     
             
@@ -227,7 +210,6 @@ def main():
             to_save = {
                 "model": accelerator.unwrap_model(model).state_dict(),
                 "ema": ema.state_dict(),
-                "optimizer": optimizer.state_dict(),
                 "epoch": epoch,
                 "args": cfg,
             }

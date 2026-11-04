@@ -11,21 +11,24 @@ import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 from collections import OrderedDict
+from einops import rearrange
+from utils import modulate
 
-@torch.no_grad()
-def update_ema(ema_model, model, decay=0.9999):
-    """
-    Step the EMA model towards the current model.
-    """
-    ema_params = OrderedDict(ema_model.named_parameters())
-    model_params = OrderedDict(model.named_parameters())
+class SRAHead(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.linear1 = nn.Linear(in_dim, in_dim+out_dim)
+        self.linear2 = nn.Linear(in_dim+out_dim, out_dim)
+        self.act = nn.SiLU()
+    @torch.compile
+    def forward(self, x):
+        x=self.linear1(x)
+        x=self.linear2(self.act(x))
+        return x
 
-    for name, param in model_params.items():
-        ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
 
-def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
 
 
 #################################################################################
@@ -69,7 +72,7 @@ class TimestepEmbedder(nn.Module):
     def forward(self, t):
         # t: (B,) 
         # t_emb: (B, hidden_size)
-        t_scaled = t.float() * 1000  # scale to [0, 1000], a design flaw in SiT.
+        t_scaled = t.float() # scale to [0, 1000], a design flaw in SiT.
         t_freq = self.timestep_embedding(t_scaled, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq)
         return t_emb
@@ -111,7 +114,7 @@ class SiTBlock(nn.Module):
             nn.Linear(hidden_size , hidden_size * 6, bias=True)
         )
 
-    
+    @torch.compile 
     def forward(self, x, c):
         # x: (B, N, D), c: (B, D)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
@@ -132,7 +135,7 @@ class FinalLayer(nn.Module):
             nn.Linear(hidden_size , hidden_size * 2, bias=True)
         )
 
-
+    @torch.compile
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
 
@@ -207,16 +210,19 @@ class SiT(nn.Module):
             mlp_ratio=4.0,
             class_dropout_prob=0.1,
             num_classes=1000,
-            learn_sigma=True, # consistent with DiT, but actually useless in DiT.
-            use_repa=False, 
+            learn_sigma=False, # consistent with DiT, but actually useless in DiT.
+            reg_type='none', # 'repa', 'irepa', 'disperse', 'ig', 'sra', 'none',
+            reg_depth=4
     ):
         super().__init__()
+        self.input_size = input_size
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
         self.out_channels = in_channels*2 if learn_sigma else in_channels 
         self.patch_size = patch_size
         self.num_head = num_heads
-        self.use_repa = use_repa
+        self.reg_type = reg_type
+        self.reg_depth = reg_depth
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
@@ -230,17 +236,27 @@ class SiT(nn.Module):
             SiTBlock(hidden_size, num_heads, mlp_ratio) for _ in range(depth)
         ])
 
-     
-
         # for REPA: XL/L, depth is 8; B/S is 4.
         # REPA dim: 2048 for hiddent, 768 as output, same as DiN0v2-vit-b.
-        if use_repa:
-            self.repa_depth = 8 if  depth >=24 else 4
+        assert reg_type in ['repa', 'irepa', 'disperse', 'ig', 'sra', 'none']
+        if reg_type == 'repa':
+            # self.reg_depth = 8 if  depth >=24 else 4
             self.repa_projector = nn.Sequential(
             nn.Linear(hidden_size, 2048), nn.SiLU(),
             nn.Linear(2048, 2048), nn.SiLU(),
             nn.Linear(2048, 768),
-        )
+            )
+        elif reg_type == 'irepa':
+            self.repa_projector = nn.Conv2d(in_channels=hidden_size, out_channels=768, kernel_size=3, stride=1, padding=1)
+        elif reg_type == 'disperse':
+            pass
+        elif reg_type == 'ig': # internal guidance
+            self.final_layer_xr = FinalLayer(hidden_size=hidden_size, patch_size=patch_size, out_channels=in_channels)
+
+        elif reg_type == 'sra': # SRA:
+            # self.final_layer_xr = FinalLayer(hidden_size=hidden_size,patch_size=patch_size, out_channels = in_channels)
+            self.final_layer_xr = SRAHead(in_dim=hidden_size, out_dim=hidden_size)
+
             
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
@@ -281,6 +297,12 @@ class SiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
+        if self.reg_type == 'ig':
+            nn.init.constant_(self.final_layer_xr.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.final_layer_xr.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.final_layer_xr.linear.weight, 0)
+            nn.init.constant_(self.final_layer_xr.linear.bias, 0)
+
     def unpatchify(self, x):
         # x: (N, num_patches, patch_size*patch_size*out_channels)
         # imgs: (N, out_channels, H, W, ) 
@@ -311,16 +333,45 @@ class SiT(nn.Module):
 
         for i,block in enumerate(self.blocks):
             x = block(x, c) # [N, num_patches, hidden_size]
-            if self.training and self.use_repa and (i + 1) == self.repa_depth:
-                h = self.repa_projector(x.reshape(-1, D)) 
-                h = h.reshape(N, T, -1) # [N, num_patches, 768]
+            if self.reg_type != "none" and (i + 1) == self.reg_depth:
+        
+                if self.reg_type == 'repa': #linear, direct forward
+                    h = self.repa_projector(x) 
+                
+                elif self.reg_type == 'irepa': # perform spatial normalization
+                    H, W = self.input_size // self.patch_size, self.input_size // self.patch_size
+                    x = rearrange(x, 'b (h w) d -> b d h w', h=H,w=W)
+                    h = self.repa_projector(x)
+                    h = rearrange(h, 'b d h w -> b (h w) d')
+
+                    # perform spatial norm
+                    gamma = 1.0
+                    mean = h.mean(dim=1, keepdim=True)
+                    std  = h.std(dim=1, keepdim=True)
+                    h = (h - gamma * mean) / (std + 1e-6)
+
+                elif self.reg_type == 'disperse':
+                    h = x # (B, N, D)
+                elif self.reg_type == 'ig':
+                    h = self.final_layer_xr(x, c)
+                    h = self.unpatchify(h) # (B, C, H, W)
+
+                elif self.reg_type == 'sra':
+                    if self.training: # for stu
+                        h = self.final_layer_xr(x)
+                    else:
+                        h = x # for teacher
+                        return h
+            # if self.training and self.use_repa and (i + 1) == self.repa_depth:
+            #     h = self.repa_projector(x.reshape(-1, D)) 
+            #     h = h.reshape(N, T, -1) # [N, num_patches, 768]
         x = self.final_layer(x, c)  # (N, num_patches, patch_size*patch_size*out_channels)
         x = self.unpatchify(x)  # (N, out_channels, H, W)
 
         if self.learn_sigma:
             x, _ = x.chunk(2, dim=1)  
         
-        if self.use_repa and self.training:
+        if self.reg_type != "none" and self.training:
             return x, h
         else:
             return x

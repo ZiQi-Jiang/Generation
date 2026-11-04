@@ -1,6 +1,6 @@
 # used to sample images for metrics.
 from config import DefaultConfig,  SimpleLogger
-from models.jit import JiT_models
+from models.jit_reg import JiT_models
 import os, sys, argparse,datetime
 import torch
 from accelerate import Accelerator
@@ -123,15 +123,17 @@ def create_npz_from_sample_folder(sample_dir, num=50_000):
 
 def main(sample_args):
     accelerator = Accelerator(mixed_precision="bf16")
-    time_list = [datetime.datetime.now().strftime("%H%M%S")]
+    beijing_tz = datetime.timezone(datetime.timedelta(hours=8))  # UTC+8, Beijing time
+    timestamp = datetime.datetime.now(beijing_tz).strftime("%Y%m%d_%H%M%S")
+    time_list = [timestamp]
     broadcast_object_list(time_list, from_process=0)
-    
     sample_dir = os.path.join('samples', time_list[0])
     if accelerator.is_main_process:
         os.makedirs(sample_dir, exist_ok=True)
         os.makedirs(os.path.join(sample_dir, "images"), exist_ok=True)
+        sys.stdout = SimpleLogger(os.path.join(sample_dir, "log.txt"))
     accelerator.wait_for_everyone()
-    sys.stdout = SimpleLogger(os.path.join(sample_dir, "log.txt"))
+
 
     torch.backends.cudnn.benchmark = True
     torch._dynamo.config.cache_size_limit = 128
@@ -160,7 +162,8 @@ def main(sample_args):
     accelerator.print(f"===== Sampling Settings =====\n{sample_args_str}\n===========================")
     
     # load model and checkpoint
-    model = JiT_models[train_cfg.model_type](input_size=train_cfg.image_size, in_channels=3, num_classes=train_cfg.num_classes, mlp_ratio=4, reg_type = train_cfg.reg_type, reg_depth=train_cfg.reg_depth)
+    model = JiT_models[train_cfg.model_type](input_size=train_cfg.image_size,in_channels=3, mlp_ratio=4.0, num_classes=train_cfg.num_classes, reg_type = train_cfg.reg_type)
+    
 
     model.load_state_dict(state_dict['ema'])
     # new_state_dict = {}

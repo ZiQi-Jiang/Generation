@@ -53,17 +53,21 @@ class DefaultConfig:
         # saving and logging
         beijing_tz = datetime.timezone(datetime.timedelta(hours=8))  # UTC+8, Beijing time
         self.timestamp = datetime.datetime.now(beijing_tz).strftime("%Y%m%d_%H%M%S")
+        self.latent_path = './data/imagenet/train_vae_latents_lmdb'
         self.data_path = './data/imagenet/images/train'
+        self.discription= ''
         
         # other helper parameters (only changed here)
         self.log_step_freq = 20
         self.save_epoch_freq = 40
         self.resume_exp = None # timestamp to resume training; None for training from scratch.
         self.resume_epoch = None # checkpoint step to load when resuming training.
+        self.use_latent = False # For SiT acceleration
 
         # our project
         self.t_level = 'image'
         self.reg_type = 'none' # 'repa' 'irepa', 'disperse', 'ig'
+        self.reg_lam = 0.5
         self.reg_depth = 4
         self.adaln_post_modulation = False
 
@@ -71,9 +75,9 @@ class DefaultConfig:
         self.t_max = 0.2
         self.reg_depth_tea = 8
 
-        # for CoFlow
-        self.flow_type = 'standard'
-        self.lam = 0.2
+        # for frequency
+        # self.jacobian = 'repa' #['repa', 'freq']
+        # self.freq_w_type = 'rgb' #['rgb', channel]
 
     def save(self, file_path=None):
         """Save configuration to JSON file"""
@@ -115,22 +119,27 @@ class DefaultConfig:
         parser.add_argument('--image_size', type=int, help='Size of input images')
         parser.add_argument('--data_path', type=str, help='Path to the training data')
         parser.add_argument('--vae', type=str, help='VAE model to use (ema or mse)')
+        parser.add_argument('--use_latent', action='store_true')
 
         parser.add_argument('--resume_exp', type=str, help='Timestamp of the experiment to resume')
         parser.add_argument('--resume_epoch', type=int, help='Checkpoint step to load')
         parser.add_argument('--t_level', type=str)
         parser.add_argument('--reg_depth', type=int)
+        parser.add_argument('--reg_depth_tea', type=int)
         parser.add_argument('--reg_type', type=str, help='Regularization type for representation alignment.')
+        parser.add_argument('--reg_lam', type=float, help='Weight for regularization loss.')
+        parser.add_argument('--freq_lam', type=float, help='Weight for regularization loss.')
         parser.add_argument('--P_mean', type=float, help='Mean for logit-normal timestep sampling')
         parser.add_argument('--P_std', type=float, help='Standard deviation for logit-normal timestep sampling')
         parser.add_argument('--ema_decay', type=float)
         parser.add_argument('--blr', type=float, help='Base learning rate')
         parser.add_argument('--adaln_post_modulation', action='store_true' )
 
+        parser.add_argument('--discription', type=str, help='Description of the experiment')
+
 
         # for CoFlow
         parser.add_argument('--flow_type',type=str)
-        parser.add_argument('--lam', type=float, help='Weight for deltaFM and NegFM')
         #for sampling
         parsed_args = parser.parse_args(args=args)
         

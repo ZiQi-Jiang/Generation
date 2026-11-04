@@ -6,6 +6,8 @@ from einops import rearrange, repeat
 from .utils import *
 
 
+
+
 class BottleneckPatchEmbed(nn.Module):
     """
     Patchify image to token. (B, 3, H, W) => (B, num_patches, p*p*3)
@@ -90,7 +92,7 @@ class LabelEmbedder(nn.Module):
 class FinalLayer(nn.Module):
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
-        self.norm = RMSNorm(hidden_size)
+        self.norm_final = RMSNorm(hidden_size)
         self.linear = nn.Linear(hidden_size, patch_size*patch_size*out_channels)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
@@ -101,10 +103,10 @@ class FinalLayer(nn.Module):
     def forward(self, x, c):
         """
         x: (B, N, D)
-        c: (B, N, D)
+        c: (B, D)
         """
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1) # (B,N,D)
-        x = modulate_token(self.norm(x), shift, scale)
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1) # (B,N)
+        x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
 
@@ -124,14 +126,14 @@ class JiTBlock(nn.Module):
     def forward(self, x, c, feat_rope=None):
         """
         x: (B, N, D)
-        c: (B, N, D)
+        c: (B, D)
         output: (B, N, D)
         """
         # each is (B,D)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
 
-        x = x + gate_msa * self.attn(modulate_token(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
-        x = x + gate_mlp * self.mlp(modulate_token(self.norm2(x), shift_mlp, scale_mlp))
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
 
         return x
 
@@ -148,7 +150,6 @@ class JiT(nn.Module):
         self.bottleneck_dim = bottleneck_dim
         self.in_context_len = in_context_len
         self.in_context_start = in_context_start
-
         # time and condition embedder
         self.t_embedder = TimestepEmbedder(hidden_size=hidden_size)
         self.y_embedder = LabelEmbedder(num_classes=num_classes, hidden_size=hidden_size)
@@ -176,6 +177,7 @@ class JiT(nn.Module):
         self.blocks = nn.ModuleList([
             JiTBlock(hidden_size=hidden_size, num_heads=num_heads, mlp_ration=mlp_ratio) for i in range(depth)
         ])
+
 
         self.final_layer = FinalLayer(hidden_size=hidden_size, patch_size=patch_size, out_channels=in_channels)
 
@@ -218,6 +220,7 @@ class JiT(nn.Module):
 
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+    
 
     def unpatchify(self, x):
         # x: (B, N, D)
@@ -226,18 +229,17 @@ class JiT(nn.Module):
         x = rearrange(x, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=h, w=w, p1 = self.patch_size, p2 = self.patch_size)
         return x
 
+
     def forward(self, x, t, y):
         # x: (B, C, H, W)
-        # t: (B, N,)float
+        # t: (B, )float
         # y: (B,) int
         # output: (B, C, H, W)
-        B,N = t.shape
-        t = rearrange(t, 'b n -> (b n)')
-        t_emb = self.t_embedder(t) # (B*N,D)
-        t_emb = rearrange(t_emb, '(b n) d -> b n d', b=B, n=N) # (B, N, D)
 
+
+        t_emb = self.t_embedder(t) # (B,D)
         y_emb = self.y_embedder(y) # (B,D)
-        c = t_emb + y_emb.unsqueeze(1) # (B,N,D)
+        c = t_emb + y_emb
 
         x = self.x_embedder(x) # (B,N,D), bottleck layer that will compress information.
         x += self.pos_embed
@@ -249,17 +251,27 @@ class JiT(nn.Module):
                 in_context_tokens = in_context_tokens +  self.in_context_posemb 
                 x = torch.cat([in_context_tokens, x],dim=1) # (B, N+L, D)
             x = block(x, c, feat_rope=self.feat_rope if i < self.in_context_start else self.feat_rope_incontext)
+
+
         x = x[:, self.in_context_len:,:] # back to (B, N, D)
         x = self.final_layer(x, c) # (B, N, D)
-        output = self.unpatchify(x) # (B, C, H, W)
-
+        output = self.unpatchify(x) # (B, C, H, W
         return output
     
 
 
+def JiT_S_16(**kwargs):
+    return JiT(depth=12, hidden_size=384, num_heads=6, 
+                bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs)
+
+def JiT_S_16_no_incontext(**kwargs):
+    return JiT(depth=12, hidden_size=384, num_heads=6, 
+                bottleneck_dim=128, in_context_len=0, in_context_start=100, patch_size=16, **kwargs)
+
 def JiT_B_16(**kwargs):
     return JiT(depth=12, hidden_size=768, num_heads=12,
                bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs)
+
 
 def JiT_B_16_no_incontext(**kwargs):
     return JiT(depth=12, hidden_size=768, num_heads=12,
@@ -286,11 +298,16 @@ def JiT_H_32(**kwargs):
                bottleneck_dim=256, in_context_len=32, in_context_start=10, patch_size=32, **kwargs)
 
 JiT_models = {
+    'JiT-S/16': JiT_S_16,
     'JiT-B/16': JiT_B_16,
     'JiT-B/32': JiT_B_32,
     'JiT-L/16': JiT_L_16,
     'JiT-L/32': JiT_L_32,
     'JiT-H/16': JiT_H_16,
     'JiT-H/32': JiT_H_32,
-    'JiT-B/16_no_incontext': JiT_B_16_no_incontext
+    'JiT-B/16_no_incontext': JiT_B_16_no_incontext,
+    'JiT-S/16_no_incontext': JiT_S_16_no_incontext
 }
+
+# def SiT_S_2(**kwargs):
+    # return SiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
