@@ -12,7 +12,7 @@ import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 from collections import OrderedDict
 from einops import rearrange
-from utils import modulate
+from .utils import modulate
 
 class SRAHead(nn.Module):
     def __init__(self, in_dim, out_dim):
@@ -216,6 +216,7 @@ class SiT(nn.Module):
     ):
         super().__init__()
         self.input_size = input_size
+        self.hidden_size = hidden_size
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
         self.out_channels = in_channels*2 if learn_sigma else in_channels 

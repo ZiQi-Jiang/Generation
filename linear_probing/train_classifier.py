@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,19 +7,22 @@ import json
 from time import time
 from models.jit_clean import JiT_models
 from models.pit import PiT_models
+from models.sit import SiT_models
 from accelerate import Accelerator, DataLoaderConfiguration
 from torchvision.transforms import Compose, Lambda, RandomHorizontalFlip, ToTensor, PILToTensor, Normalize,RandomResizedCrop
 import torch.utils.data as tud
 from torchvision.datasets import ImageFolder
 from models.utils import center_crop_arr
 from accelerate.utils import set_seed
+from diffusers.models import AutoencoderKL
+from pathlib import Path
 from einops import rearrange
 class StopForwardException(Exception):
     pass
 
 
 @torch.no_grad()
-def evaluate(classifiers, val_loader, accelerator, model, hook_cache, cfg):
+def evaluate(classifiers, val_loader, accelerator, model, hook_cache, cfg, vae=None):
     model.eval()
     [classifier.eval() for classifier in classifiers]
     total_samples = 0
@@ -28,6 +32,8 @@ def evaluate(classifiers, val_loader, accelerator, model, hook_cache, cfg):
     for x, target in val_loader:
         x1 = x.to(torch.float32).div_(255)
         x1 = 2.0 * x1 - 1.0  
+        if vae is not None:
+            x1 = vae.encode(x1).latent_dist.sample().mul_(0.18215)  # [B_local, C, H/8, W/8]
         b = x1.shape[0]
         t = torch.full((b, ), cfg.t, dtype=torch.float32, device=accelerator.device)
         y = torch.full((b, ), cfg.num_classes, dtype=torch.long, device=accelerator.device)
@@ -38,7 +44,8 @@ def evaluate(classifiers, val_loader, accelerator, model, hook_cache, cfg):
         hook_cache.clear()
         with torch.autocast('cuda', dtype=torch.bfloat16):
             try: 
-                _ = model(xt, t, y)
+                model_t = 1.0 - t if cfg.model_type == 'SRA' else t
+                _ = model(xt, model_t, y)
             except StopForwardException:
                 pass
         
@@ -68,7 +75,7 @@ def main(cfg):
      # set up config
     dataloader_config = DataLoaderConfiguration(non_blocking=True)
     accelerator = Accelerator(mixed_precision="no", dataloader_config=dataloader_config)
-
+    PROJECT_DIR = Path(__file__).resolve().parents[1]
     set_seed(0)
 
     train_transform = Compose([
@@ -96,7 +103,7 @@ def main(cfg):
     # 
     if  cfg.model_type in JiT_models.keys(): 
         model = JiT_models['JiT-H/16'](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
-        state_dict = torch.load(f'/data/Generation/data/official_ckpts/jit_h_16.pt', map_location='cpu')
+        state_dict = torch.load(f'{PROJECT_DIR}/data/official_ckpts/jit_h_16.pt', map_location='cpu')
         weights = state_dict['model_ema1']
         weights = {key.removeprefix('net.'): value for key,value in weights.items() }
         model.load_state_dict(weights, strict=True)
@@ -117,7 +124,7 @@ def main(cfg):
     
     if cfg.model_type in PiT_models.keys():
         model = PiT_models['PiT-XL/16'](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
-        state_dict = torch.load(f'/data/Generation/data/official_ckpts/pixeldit.pt', map_location='cpu')
+        state_dict = torch.load(f'{PROJECT_DIR}/data/official_ckpts/pixeldit.pt', map_location='cpu')
         weights = {}
         for key, value in state_dict['state_dict'].items():
             if key.startswith('ema_denoiser'):
@@ -147,8 +154,38 @@ def main(cfg):
                 model.patch_blocks[layer_idx].register_forward_hook(make_hook(layer_idx))
             else:
                 model.pixel_blocks[layer_idx - model.patch_depth].register_forward_hook(make_hook(layer_idx))
+    
 
+    if cfg.model_type in ['SiT', 'SRA', 'SelfFlow']:
+        model = SiT_models['SiT-XL/2'](input_size=cfg.image_size//8, in_channels=4, num_classes=cfg.num_classes, mlp_ratio=4, learn_sigma=cfg.model_type != 'SRA')
+        vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(accelerator.device)
+        if cfg.model_type == 'SiT':
+            weights = torch.load(f'{PROJECT_DIR}/data/official_ckpts/sit.pt', map_location='cpu', weights_only=True, mmap=True)
 
+        elif cfg.model_type == 'SRA':
+            weights = torch.load(f'{PROJECT_DIR}/data/official_ckpts/sra.pt', map_location='cpu', weights_only=True, mmap=True)
+            weights = {key: value for key, value in weights.items() if not key.startswith('ap_head.')}
+
+        elif cfg.model_type == 'SelfFlow':
+            state_dict = torch.load(f'{PROJECT_DIR}/data/official_ckpts/self_flow.pt', map_location='cpu', weights_only=True, mmap=True)
+            weights = state_dict['model']
+            weights = {key: value for key, value in weights.items() if not key.startswith('projector.')}
+            key = 'x_embedder.proj.weight'
+            weights[key] = weights[key].reshape(1152, 4, 2, 2)
+
+        model.load_state_dict(weights, strict=True)
+        model  = model.eval().requires_grad_(False).to(accelerator.device)
+        vae = vae.eval().requires_grad_(False).to(accelerator.device)
+        def make_hook(layer_idx):
+            def hook_fn(module, input, output):
+                hook_cache[layer_idx] = output.float().mean(dim=1)  # [B, N, D] -> [B, D]
+                if layer_idx == last_layer:
+                    raise StopForwardException
+            return hook_fn
+        
+        for layer_idx in cfg.layer_idx:
+            model.blocks[layer_idx].register_forward_hook(make_hook(layer_idx))
+        
     num_classes = 1000
     feature_dim = model.hidden_size
 
@@ -185,6 +222,10 @@ def main(cfg):
             with torch.no_grad():
                 x1 = x1.to(torch.float32).div_(255)
                 x1 = 2.0 * x1 - 1.0  
+
+                if cfg.model_type in ['SiT', 'SRA', 'SelfFlow']:
+                    x1 = vae.encode(x1).latent_dist.sample().mul_(0.18215)  # [B_local, C, H/8, W/8]
+
                 b = x1.shape[0]
                 noise = torch.randn_like(x1) 
                 t = torch.full((b, ), cfg.t, dtype=torch.float32, device=accelerator.device)
@@ -195,7 +236,8 @@ def main(cfg):
                 hook_cache.clear()
                 with torch.autocast('cuda', dtype=torch.bfloat16):
                     try:
-                        _ = model(xt, t, y)
+                        model_t = 1.0 - t if cfg.model_type == 'SRA' else t
+                        _ = model(xt, model_t, y)
                     except StopForwardException:
                         pass
 
@@ -217,7 +259,7 @@ def main(cfg):
         [scheduler.step() for scheduler in schedulers]
 
         if epoch >= cfg.epochs * 0.8:
-            val_top1s = evaluate(classifiers, val_loader, accelerator, model, hook_cache, cfg)
+            val_top1s = evaluate(classifiers, val_loader, accelerator, model, hook_cache, cfg, vae)
             best_vals = [max(best_val, val_top1) for best_val, val_top1 in zip(best_vals, val_top1s)]
 
     if accelerator.is_main_process:
@@ -254,6 +296,7 @@ if __name__ == '__main__':
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cuda.matmul.allow_tf32 = True
+
 
     # torch._dynamo.config.disable = True
     main(cfg)
