@@ -143,7 +143,7 @@ class ViT(nn.Module):
 
 
 
-    def forward(self, x):
+    def forward_feature(self, x):
         pos_embed = self.interpolate_pos_emb(x)
         x = self.patch_emb(x) #[B,C,H,W] -> [B,N,D]
 
@@ -153,8 +153,10 @@ class ViT(nn.Module):
         x = x + pos_embed
         for block in self.blocks:
             x = block(x)
+        return x
 
-        # cls, x = unpack(x, ps, 'B * D')
+    def forward(self,x):
+        x = self.forward_feature(x)
         out = self.head(self.norm(x[:,0])) #[B,1, num_classes]
         return out
 

@@ -119,19 +119,20 @@ def create_npz_from_sample_folder(sample_dir, num=50_000):
 
 def main(sample_args):
     accelerator = Accelerator(mixed_precision="bf16")
-    time_list = [datetime.datetime.now().strftime("%H%M%S")]
-    broadcast_object_list(time_list, from_process=0)
+    # time_list = [datetime.datetime.now().strftime("%H%M%S")]
+    # broadcast_object_list(time_list, from_process=0)
     
-    sample_dir = os.path.join('samples', time_list[0])
+    # sample_dir = os.path.join('samples', sample_args.exp, f'')
+    sample_dir = f'exp/{sample_args.exp}/samples_epoch_{sample_args.epoch:03d}'
     if accelerator.is_main_process:
         os.makedirs(sample_dir, exist_ok=True)
         os.makedirs(os.path.join(sample_dir, "images"), exist_ok=True)
-    sys.stdout = SimpleLogger(os.path.join(sample_dir, "log.txt"))
+        sys.stdout = SimpleLogger(os.path.join(sample_dir, "sample_log.txt"))
 
+    torch.set_float32_matmul_precision('high') 
     torch.backends.cudnn.benchmark = True
     torch._dynamo.config.cache_size_limit = 128
     torch._dynamo.config.optimize_ddp = False
-    torch.set_float32_matmul_precision('high') # important for accleration
 
     train_cfg = DefaultConfig()
     if sample_args.exp : # load by experiments
@@ -139,7 +140,7 @@ def main(sample_args):
         cfg_path = os.path.join('exp',sample_args.exp, 'config.json')
         train_cfg = DefaultConfig.from_json(cfg_path)
         ckpt_path = os.path.join('exp',sample_args.exp, f'epoch_{sample_args.epoch:03d}.pth')
-        state_dict = torch.load(ckpt_path, map_location='cpu')
+        state_dict = torch.load(ckpt_path, map_location='cpu',weights_only=False)
     else: # load by hands.
         accelerator.print("Using default configuration for SiT-XL/2 trained on 1000 classes.")
         train_cfg.dit_type = 'JiT-B/16'
@@ -148,7 +149,7 @@ def main(sample_args):
         train_cfg.mlp_ratio = 4.0
         train_cfg.in_channels = 3
         ckpt_path = './data/checkpoints/jit_b16_e600.pth'
-        state_dict = torch.load(ckpt_path, map_location='cpu')
+        state_dict = torch.load(ckpt_path, map_location='cpu',weights_only=False)
     # print train cfg and sampling sample_args
     accelerator.print(train_cfg)
     sample_args_str = "\n".join([f"{key}: {value}" for key, value in vars(sample_args).items()])
@@ -198,7 +199,7 @@ def main(sample_args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sample from the trained model")
-    parser.add_argument('--exp', type=str, default=None, help='Timestamp of the experiment to load (default, using JiT-B/16 trained on 1000 classes)')
+    parser.add_argument('--exp', type=str, required=True, help='Timestamp of the experiment to load (default, using JiT-B/16 trained on 1000 classes)')
     parser.add_argument('--epoch', type=int, default=200, help='Checkpoint step to load')
     parser.add_argument('--sample_seed', type=int, default=0, help='Random seed for sampling')
     parser.add_argument('--cfg_scale', type=float, default=1.0,  help='Classifier-free guidance scale')

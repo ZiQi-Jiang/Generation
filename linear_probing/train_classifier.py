@@ -287,7 +287,7 @@ if __name__ == '__main__':
 
     cfg = parser.parse_args()
     cfg.local_batch_size = 128
-    cfg.data_path = '/data/Generation/data/imagenet/images'
+    cfg.data_path = str(Path(__file__).resolve().parents[1] / 'data/imagenet/images')
     cfg.image_size =  256
     cfg.num_classes = 1000
     cfg.blr = 0.001

@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 import sys
 import os
 from config import DefaultConfig, SimpleLogger
@@ -12,12 +11,8 @@ from einops import rearrange
 from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import set_seed, broadcast_object_list
 from models.jit_clean import JiT_models
-import numpy as np
 from PIL import Image
-import timm
-from collections import OrderedDict
-from torch.func import jvp
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+
 
 @torch.no_grad()
 def update_ema(ema_model, model, decay=0.9999):
@@ -64,11 +59,9 @@ def main():
     cfg.results_dir = f'./exp/{cfg.timestamp}/'
 
     set_seed(cfg.seed, device_specific=True)
-    # for accelerationf
+    # for acceleration
 
     torch.set_float32_matmul_precision('high') 
-    # torch.backends.cudnn.benchmark = True
-    #TODO
     torch.backends.cudnn.benchmark = True
     torch._dynamo.config.cache_size_limit = 128
     torch._dynamo.config.optimize_ddp = False
@@ -83,18 +76,21 @@ def main():
 
     # prepare data
     # Normalize is different for vae and dino. So we move it to the training loop.
-    transform = Compose([
-        Lambda(lambda pil_image: center_crop_arr(pil_image, cfg.image_size)),
-        RandomHorizontalFlip(),
-        # ToTensor(), 
-        PILToTensor(), # Faster than ToTensor
-        # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
-    ])
 
-    dataset = ImageFolder(cfg.data_path, transform=transform)
+    dataset = ImageFolder(cfg.data_path)
+    if cfg.data_backend == 'pil':
+        dataset.transform = Compose([
+            Lambda(lambda pil_image: center_crop_arr(pil_image, cfg.image_size)),
+            RandomHorizontalFlip(),
+            # ToTensor(), 
+            PILToTensor(), # Faster than ToTensor
+            # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+        ])
+        dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=8, pin_memory=True, drop_last=True)
 
-    # TODO:
-    dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=8, pin_memory=True, drop_last=True)
+    else: # DALI
+        from datasets.dali_loader import JitDaliLoader
+        dataloader = JitDaliLoader(dataset, cfg, accelerator)
 
     # TODO: proj_drop 
     model = JiT_models[cfg.dit_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
@@ -112,14 +108,17 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0)
     accelerator.print(optimizer)
 
+
+    # model = torch.compile(model)
+    if cfg.data_backend == 'pil':
+        dataloader = accelerator.prepare(dataloader)
+    
     # linear warmup, then constant
     warmup_steps = cfg.warmup_epochs * len(dataloader)
     lr_lambda = lambda cur_step : cur_step / warmup_steps if cur_step < warmup_steps else 1.0 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lr_lambda)
 
-    # model = torch.compile(model)
-    dataloader, model, optimizer, scheduler= accelerator.prepare(dataloader, model,  optimizer,scheduler)
-
+    model, optimizer,= accelerator.prepare( model,  optimizer)
     accelerator.print(f"Num proccess: {accelerator.num_processes}; Mixed precision: {accelerator.mixed_precision}")
     accelerator.print(f"Dataset size: {len(dataset)} images")
 
@@ -138,8 +137,6 @@ def main():
     start_epoch,train_steps, log_steps, running_loss, running_reg_loss, running_fm_loss = 1,0,0,0,0,0
     train_start_time = time()
     rng = torch.Generator(accelerator.device).manual_seed(42) # for negative sampling.
-
-
 
     for epoch in range(start_epoch, cfg.epochs+1):
         accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch}/{cfg.epochs}...")
@@ -173,7 +170,6 @@ def main():
                 fm_loss = (v_target - v_pred)**2 # (B, C, H, W)
                 fm_loss = fm_loss.mean(dim=[1,2,3]).mean()
 
-
                 loss = fm_loss 
 
             optimizer.zero_grad()
@@ -200,10 +196,8 @@ def main():
                 )
                 running_loss = 0
                 running_fm_loss = 0
-                running_reg_loss = 0
                 log_steps = 0
     
-            
         if epoch % cfg.save_epoch_freq == 0 or epoch == cfg.epochs:
             accelerator.wait_for_everyone()
             
@@ -219,7 +213,17 @@ def main():
                 torch.save(to_save, checkpoint_path)
             # accelerator.save_state(checkpoint_path)
             accelerator.print(f"✅ Saved checkpoint at: {checkpoint_path}")
-            
+            # sample_args = SimpleNamespace(num_samples=50_000, batch_size=64, sample_steps=50, cfg_scale=1.0, cfg_min=0.1, cfg_max=1.0, t_eps=0.05)
+            # sample_dir = os.path.join(cfg.results_dir, f"fid_{epoch:03d}")
+            # if accelerator.is_main_process:
+            #     os.makedirs(os.path.join(sample_dir, "images", exist_ok=True))
+            # accelerator.wait_for_everyone()
+            # with torch.random.fork_rng(devices=[accelerator.device.index]):
+            #     torch.cuda.manual_seed(accelerator.process_index)
+            #     sample(ema, accelerator, sample_dir, sample_args, cfg)
+            #     if accelerator.is_main_process:
+            #         metrics = torch_fidelity.calculate_metrics(input1=os.path.join(sample_dir, 'images'), input2=None, fid_statistics_file=(f'./data/jit_in{cfg.image_size}_stats.npz'), cuda=True, isc=True, kid=False, prc=False, verbose=False)
+            #         accelerator.print(f'Epoch {epoch}, FID: {metrics['frechet_inception_distance']:.4f},I S: {metrics['inception_score_mean']:.4f}')
 if __name__ == '__main__':
     main()
 

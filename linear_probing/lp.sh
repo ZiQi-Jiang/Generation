@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -e
-source /root/miniconda3/etc/profile.d/conda.sh
-conda activate negfm
 
+cd "$(dirname "$0")"
 
-export PYTHONPATH=/data/Generation:${PYTHONPATH:-}
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate sslfm
+
+export PYTHONPATH="$(dirname "$PWD"):${PYTHONPATH:-}"
 
 # for t in 0.9 0.8 0.7; do
 #     accelerate launch --multi_gpu --num_processes 8 --mixed_precision no train_classifier.py --model_type JiT-H/16 --t "$t" --layer_idx 3 7 11 15 17 23 27 31

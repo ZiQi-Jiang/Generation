@@ -3,16 +3,13 @@
 
 ## Environment
 
-The current environment uses Python 3.10, PyTorch 2.1.0,
-torchvision 0.16.0, and CUDA 12.1 wheels.
+The environment uses Python 3.10, PyTorch 2.7.1+cu128,
+torchvision 0.22.1+cu128, and NVIDIA DALI 2.4.0.
 
-Create the environment and install dependencies from the repository root:
 
 ```bash
 conda create -n sslfm python=3.10 -y
 conda activate sslfm
-
-pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu121
 
 pip install -r requirements.txt
 ```
@@ -24,6 +21,9 @@ Download
 bash download_data.sh
 ```
 
+```
+wget -O data/jit_in256_stats.npz https://raw.githubusercontent.com/LTH14/JiT/main/fid_stats/jit_in256_stats.npz
+```
 
 ImageNet must use the ImageFolder layout:
 
@@ -66,6 +66,19 @@ Training outputs are saved under `exp/<timestamp>/`.
 For cached SiT training, `--use_latent` selects the LMDB dataset.
 Its location is configured through `latent_path` in `config.py`.
 
+Results are organised as follows:
+```text
+exp/<timestamp>/
+├── config.json
+├── log.txt
+├── epoch_080.pth
+├── knn.jsonl
+└── samples_epoch_080/
+    ├── sample_log.txt
+    └── images/
+```
+
+
 ## Linear probing
 
 The current linear probing script uses absolute paths under `/data/Generation`.
@@ -75,7 +88,7 @@ repository path, and GPU count in `lp.sh` when moving to another machine.
 Run the local launcher from its directory:
 
 ```bash
-conda activate negfm
+conda activate sslfm
 cd /data/Generation/linear_probing
 bash lp.sh
 ```

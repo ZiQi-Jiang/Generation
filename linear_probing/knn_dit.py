@@ -18,6 +18,11 @@ from diffusers.models import AutoencoderKL
 from pathlib import Path
 from tqdm.auto import tqdm
 from einops import rearrange
+from config import DefaultConfig
+from config import DefaultConfig, SimpleLogger
+from models.dino_vit import ViT
+from torchvision.transforms import Resize, CenterCrop, InterpolationMode
+import sys
 class StopForwardException(Exception):
     pass
 
@@ -44,7 +49,7 @@ def evaluate(all_features, all_labels, val_loader, accelerator, model, hook_cach
         hook_cache.clear()
         with torch.autocast('cuda', dtype=torch.bfloat16):
             try: 
-                model_t = 1.0 - t if cfg.model_type == 'SRA' else t
+                model_t = 1.0 - t if cfg.dit_type == 'SRA' else t
                 _ = model(xt, model_t, y)
             except StopForwardException:
                 pass
@@ -76,7 +81,10 @@ def main(cfg):
      # set up config
     dataloader_config = DataLoaderConfiguration(non_blocking=True)
     accelerator = Accelerator(mixed_precision="no", dataloader_config=dataloader_config)
-    PROJECT_DIR = Path(__file__).resolve().parents[1]
+    PROJECT_DIR = cfg.project_dir
+    # if cfg.exp and accelerator.is_main_process:
+        # logger = SimpleLogger(f'{PROJECT_DIR}/exp/{cfg.exp}/knn.jsonl')
+        # sys.stdout, sys.stderr = logger, logger
     set_seed(0)
 
     train_transform = Compose([
@@ -98,11 +106,16 @@ def main(cfg):
     hook_cache = []
     layer_idx, last_layer, vae = cfg.layer_idx, cfg.layer_idx, None
     # 
-    if  cfg.model_type in JiT_models.keys(): 
-        model = JiT_models['JiT-H/16'](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
-        state_dict = torch.load(f'{PROJECT_DIR}/data/official_ckpts/jit_h_16.pt', map_location='cpu')
-        weights = state_dict['model_ema1']
-        weights = {key.removeprefix('net.'): value for key,value in weights.items() }
+    if  cfg.dit_type in JiT_models.keys(): 
+        model = JiT_models[cfg.dit_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
+        if cfg.exp:
+            state_dict = torch.load(cfg.checkpoint_path, map_location='cpu',weights_only=False)
+            weights = state_dict['ema']
+            cfg.epoch = state_dict['epoch']
+        else:
+            state_dict = torch.load(f'{PROJECT_DIR}/data/official_ckpts/jit_h_16.pt', map_location='cpu',weights_only=False)
+            weights = state_dict['model_ema1']
+            weights = {key.removeprefix('net.'): value for key,value in weights.items() }
         model.load_state_dict(weights, strict=True)
         model.eval().requires_grad_(False)
         model = model.to(accelerator.device)
@@ -119,9 +132,9 @@ def main(cfg):
         
         model.blocks[layer_idx].register_forward_hook(make_hook(layer_idx))
     
-    elif cfg.model_type in PiT_models.keys():
+    elif cfg.dit_type in PiT_models.keys():
         model = PiT_models['PiT-XL/16'](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
-        state_dict = torch.load(f'{PROJECT_DIR}/data/official_ckpts/pixeldit.pt', map_location='cpu')
+        state_dict = torch.load(f'{PROJECT_DIR}/data/official_ckpts/pixeldit.pt', map_location='cpu',weights_only=False)
         weights = {}
         for key, value in state_dict['state_dict'].items():
             if key.startswith('ema_denoiser'):
@@ -154,17 +167,17 @@ def main(cfg):
             model.pixel_blocks[layer_idx - model.patch_depth].register_forward_hook(make_hook(layer_idx))
     
 
-    elif cfg.model_type in ['SiT', 'SRA', 'SelfFlow']:
-        model = SiT_models['SiT-XL/2'](input_size=cfg.image_size//8, in_channels=4, num_classes=cfg.num_classes, mlp_ratio=4, learn_sigma=cfg.model_type != 'SRA')
+    elif cfg.dit_type in ['SiT', 'SRA', 'SelfFlow']:
+        model = SiT_models['SiT-XL/2'](input_size=cfg.image_size//8, in_channels=4, num_classes=cfg.num_classes, mlp_ratio=4, learn_sigma=cfg.dit_type != 'SRA')
         vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(accelerator.device)
-        if cfg.model_type == 'SiT':
+        if cfg.dit_type == 'SiT':
             weights = torch.load(f'{PROJECT_DIR}/data/official_ckpts/sit.pt', map_location='cpu', weights_only=True, mmap=True)
 
-        elif cfg.model_type == 'SRA':
+        elif cfg.dit_type == 'SRA':
             weights = torch.load(f'{PROJECT_DIR}/data/official_ckpts/sra.pt', map_location='cpu', weights_only=True, mmap=True)
             weights = {key: value for key, value in weights.items() if not key.startswith('ap_head.')}
 
-        elif cfg.model_type == 'SelfFlow':
+        elif cfg.dit_type == 'SelfFlow':
             state_dict = torch.load(f'{PROJECT_DIR}/data/official_ckpts/self_flow.pt', map_location='cpu', weights_only=True, mmap=True)
             weights = state_dict['model']
             weights = {key: value for key, value in weights.items() if not key.startswith('projector.')}
@@ -204,7 +217,7 @@ def main(cfg):
             hook_cache.clear()
             with torch.autocast('cuda', dtype=torch.bfloat16):
                 try:
-                    model_t = 1.0 - t if cfg.model_type == 'SRA' else t
+                    model_t = 1.0 - t if cfg.dit_type == 'SRA' else t
                     _ = model(xt, model_t, y)
                 except StopForwardException:
                     pass
@@ -216,7 +229,7 @@ def main(cfg):
     acc, acc5 = evaluate(all_features, all_labels, val_loader, accelerator, model, hook_cache, cfg, vae)
     if accelerator.is_main_process:
         record = {
-            "model_type": cfg.model_type,
+            "dit_type": cfg.dit_type,
             "t": cfg.t,
             "layer_idx": cfg.layer_idx,
             "k": cfg.k,
@@ -225,24 +238,38 @@ def main(cfg):
             "top5": acc5,
             "image_size": cfg.image_size,
             "num_train": all_labels.shape[0],
+            'exp': cfg.exp,
+            'base model epoch': cfg.epoch,
+            
         }
-        with open('knn_results.jsonl', 'a', encoding='utf-8') as f:
+        results_path = f'{PROJECT_DIR}/exp/{cfg.exp}/knn.jsonl' if cfg.exp else Path('knn_results.jsonl')
+        with open(results_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
         print(f"Saving result: {record}")
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Linear Probing Training.")
-    parser.add_argument('--model_type', type=str, default=None )
+    parser.add_argument('--dit_type', type=str, default=None )
     parser.add_argument('--t', type=float, default=None)
     parser.add_argument('--layer_idx', type=int, default=None)
+    parser.add_argument('--exp', type=str, default=None)
+    parser.add_argument('--epoch', type=int, default=None)
+    parser.add_argument('--data_path',type=str, default=str(Path(__file__).resolve().parents[1]/ 'data/imagenet/images'), )
+
 
     cfg = parser.parse_args()
-    cfg.data_path = '/data/Generation/data/imagenet/images'
+    cfg.project_dir = Path(__file__).resolve().parents[1]
     cfg.image_size =  256
     cfg.num_classes = 1000
     cfg.local_batch_size = 128
     cfg.k = 20
     cfg.temperature = 0.07
 
+    if cfg.exp: # from our trained model, instead of official checkpoint
+        train_cfg = DefaultConfig.from_json(f'{cfg.project_dir}/exp/{cfg.exp}/config.json')
+        cfg.dit_type = train_cfg.dit_type 
+        cfg.image_size = train_cfg.image_size
+        cfg.num_classes = train_cfg.num_classes
+        cfg.checkpoint_path = f'{cfg.project_dir}/exp/{cfg.exp}/epoch_{cfg.epoch:03d}.pth'
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.allow_tf32 = True

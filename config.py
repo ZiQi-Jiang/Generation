@@ -59,7 +59,7 @@ class DefaultConfig:
         
         # other helper parameters (only changed here)
         self.log_step_freq = 100
-        self.save_epoch_freq = 100
+        self.save_epoch_freq = 50
         self.use_latent = False # For SiT acceleration
 
         # our project
@@ -132,7 +132,7 @@ class DefaultConfig:
         parser.add_argument('--data_backend', type=str, choices=['pil', 'dali'])
         parser.add_argument('--vae', type=str, help='VAE model to use (ema or mse)')
         parser.add_argument('--use_latent', action='store_true')
-
+        parser.add_argument('--timestamp', type=str)
         parser.add_argument('--t_level', type=str)
         parser.add_argument('--reg_depth', type=int)
         parser.add_argument('--reg_depth_tea', type=int)
