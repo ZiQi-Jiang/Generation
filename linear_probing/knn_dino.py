@@ -70,7 +70,7 @@ def evaluate(all_features, all_labels, val_loader, accelerator, model,  cfg, ):
 def main(cfg):
      # set up config
     dataloader_config = DataLoaderConfiguration(non_blocking=True)
-    accelerator = Accelerator(mixed_precision="no", dataloader_config=dataloader_config)
+    accelerator = Accelerator(dataloader_config=dataloader_config)
     PROJECT_DIR = cfg.project_dir
     # if cfg.exp and accelerator.is_main_process:
         # logger = SimpleLogger(f'{PROJECT_DIR}/exp/{cfg.exp}/knn.jsonl')

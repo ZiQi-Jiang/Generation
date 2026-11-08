@@ -78,32 +78,3 @@ exp/<timestamp>/
     └── images/
 ```
 
-
-## Linear probing
-
-The current linear probing script uses absolute paths under `/data/Generation`.
-Update the dataset path in `train_classifier.py` and the environment,
-repository path, and GPU count in `lp.sh` when moving to another machine.
-
-Run the local launcher from its directory:
-
-```bash
-conda activate sslfm
-cd /data/Generation/linear_probing
-bash lp.sh
-```
-
-The same experiment can be launched directly:
-
-```bash
-export PYTHONPATH=/data/Generation:${PYTHONPATH:-}
-
-accelerate launch --multi_gpu --num_processes 8 \
-    --mixed_precision no train_classifier.py \
-    --model_type SelfFlow \
-    --t 1.0 \
-    --layer_idx 3 7 11 15 19 23 27
-```
-
-Replace `SelfFlow` with `SiT` or `SRA` to evaluate the other latent models.
-
