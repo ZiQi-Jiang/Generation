@@ -149,7 +149,7 @@ def main(sample_args):
         state_dict = torch.load(ckpt_path, map_location='cpu')
     else: # load by hands.
         accelerator.print("Using default configuration for SiT-XL/2 trained on 1000 classes.")
-        train_cfg.model_type = 'JiT-B/16'
+        train_cfg.dit_type = 'JiT-B/16'
         train_cfg.image_size = 256
         train_cfg.num_classes = 1000
         train_cfg.mlp_ratio = 4.0
@@ -162,7 +162,7 @@ def main(sample_args):
     accelerator.print(f"===== Sampling Settings =====\n{sample_args_str}\n===========================")
     
     # load model and checkpoint
-    model = JiT_models[train_cfg.model_type](input_size=train_cfg.image_size,in_channels=3, mlp_ratio=4.0, num_classes=train_cfg.num_classes, reg_type = train_cfg.reg_type)
+    model = JiT_models[train_cfg.dit_type](input_size=train_cfg.image_size,in_channels=3, mlp_ratio=4.0, num_classes=train_cfg.num_classes, reg_type = train_cfg.reg_type)
     
 
     model.load_state_dict(state_dict['ema'])

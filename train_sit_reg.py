@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image
 from types import SimpleNamespace
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
-from dataset import LMDBLatentsDataset
+from datasets.dataset import LMDBLatentsDataset
 
 
 def calculate_pairwise_distance(h):
@@ -112,7 +112,7 @@ def main():
         repa_encoder = repa_encoder.to(accelerator.device)
         repa_encoder.requires_grad_(False)
         repa_encoder.eval()
-    model = SiT_models[cfg.model_type](input_size=latent_size,num_classes=cfg.num_classes, reg_type=cfg.reg_type, reg_depth=cfg.reg_depth)
+    model = SiT_models[cfg.dit_type](input_size=latent_size,num_classes=cfg.num_classes, reg_type=cfg.reg_type, reg_depth=cfg.reg_depth)
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(accelerator.device).eval()
     ema = deepcopy(model).to(accelerator.device)
     for param in ema.parameters():
@@ -136,7 +136,7 @@ def main():
 
         
     num_params = sum(p.numel() for p in model.parameters())
-    accelerator.print(f"Model {cfg.model_type} has {num_params/1e6:.2f} M parameters.")
+    accelerator.print(f"Model {cfg.dit_type} has {num_params/1e6:.2f} M parameters.")
     accelerator.print(
         f"Parameter dtypes -> model: {next(model.parameters()).dtype}, vae: {next(vae.parameters()).dtype}"
     )
@@ -315,4 +315,4 @@ if __name__ == '__main__':
     main()
 
 
-#  accelerate launch --num_processes=3 train.py --batch_size 64  --epochs 500 --num_classes 10 --seed 0 --model_type 'SiT-S/2' --flow_type 'standard';
+#  accelerate launch --num_processes=3 train.py --batch_size 64  --epochs 500 --num_classes 10 --seed 0 --dit_type 'SiT-S/2' --flow_type 'standard';

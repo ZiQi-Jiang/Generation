@@ -97,7 +97,7 @@ def main():
     dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=8, pin_memory=True, drop_last=True)
 
     # TODO: proj_drop 
-    model = JiT_models[cfg.model_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
+    model = JiT_models[cfg.dit_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
     ema = deepcopy(model).to(accelerator.device)
     for param in ema.parameters():
         param.requires_grad_(False)
@@ -125,7 +125,7 @@ def main():
 
     # num_params = sum(p.numel() for p in model.parameters())
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    accelerator.print(f"Model {cfg.model_type} has trainable {num_params/1e6:.6f} M parameters.")
+    accelerator.print(f"Model {cfg.dit_type} has trainable {num_params/1e6:.6f} M parameters.")
     accelerator.print(
         f"Parameter dtypes -> model: {next(model.parameters()).dtype}"
     )
@@ -224,4 +224,4 @@ if __name__ == '__main__':
     main()
 
 
-#  accelerate launch --num_processes=3 train.py --batch_size 64  --epochs 500 --num_classes 10 --seed 0 --model_type 'SiT-S/2' --flow_type 'standard';
+#  accelerate launch --num_processes=3 train.py --batch_size 64  --epochs 500 --num_classes 10 --seed 0 --dit_type 'SiT-S/2' --flow_type 'standard';

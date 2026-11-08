@@ -151,7 +151,7 @@ def main(sample_args):
         state_dict = torch.load(ckpt_path, map_location='cpu')
     else: # load by hands.
         accelerator.print("Using default configuration for SiT-XL/2 trained on 1000 classes.")
-        train_cfg.model_type = 'SiT-B/2'
+        train_cfg.dit_type = 'SiT-B/2'
         train_cfg.image_size = 256
         train_cfg.num_classes = 1000
         train_cfg.mlp_ratio = 4.0
@@ -165,7 +165,7 @@ def main(sample_args):
     
     # load model and checkpoint
     latent_size = train_cfg.image_size // 8
-    model = SiT_models[train_cfg.model_type](input_size=latent_size, num_classes=train_cfg.num_classes, mlp_ratio=4, reg_type = train_cfg.reg_type)
+    model = SiT_models[train_cfg.dit_type](input_size=latent_size, num_classes=train_cfg.num_classes, mlp_ratio=4, reg_type = train_cfg.reg_type)
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(accelerator.device)
     model.load_state_dict(state_dict['ema'])
     # new_state_dict = {}

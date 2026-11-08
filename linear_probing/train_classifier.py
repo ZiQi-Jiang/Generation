@@ -263,7 +263,7 @@ def main(cfg):
             best_vals = [max(best_val, val_top1) for best_val, val_top1 in zip(best_vals, val_top1s)]
 
     if accelerator.is_main_process:
-        file_path = 'results.jsonl'
+        file_path = 'lp_results.jsonl'
         with open(file_path, mode='a', encoding='utf-8') as f:
             for i, layer_idx in enumerate(cfg.layer_idx):
                 record = {

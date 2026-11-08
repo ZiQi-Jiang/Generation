@@ -40,12 +40,12 @@ class DefaultConfig:
         self.epochs = 40
         self.num_classes = 1000
         self.seed = 0
-        self.model_type = 'JiT-B/16' 
+        self.dit_type = 'JiT-B/16' 
         self.image_size = 256 
         self.noise_scale = self.image_size / 256 * 1.0
         self.blr = 5e-5
         self.warmup_epochs = 5
-
+        self.data_backend = 'pil' # pil / dali  
         # for logit-normal timestep sampling
         self.P_mean = -0.8
         self.P_std =  0.8
@@ -58,10 +58,8 @@ class DefaultConfig:
         self.discription= ''
         
         # other helper parameters (only changed here)
-        self.log_step_freq = 20
-        self.save_epoch_freq = 40
-        self.resume_exp = None # timestamp to resume training; None for training from scratch.
-        self.resume_epoch = None # checkpoint step to load when resuming training.
+        self.log_step_freq = 100
+        self.save_epoch_freq = 100
         self.use_latent = False # For SiT acceleration
 
         # our project
@@ -71,6 +69,19 @@ class DefaultConfig:
         self.reg_depth = 4
         self.adaln_post_modulation = False
 
+        # for dino
+        self.dino_type = 'vit_s_16'
+        self.global_views = 2
+        self.local_views = 10
+        self.global_crops_scale =  (0.25, 1.0)
+        self.local_crops_scale = (0.05, 0.25)
+        self.warmup_teacher_temp = 0.04
+        self.teacher_temp = 0.07
+        self.warmup_teacher_temp_epochs = 30
+        self.weight_decay = 0.04
+        self.weight_decay_end = 0.4
+        self.min_lr = 1e-5
+        self.freeze_last_layer = 1
         # for sra
         self.t_max = 0.2
         self.reg_depth_tea = 8
@@ -115,14 +126,13 @@ class DefaultConfig:
         parser.add_argument('--epochs', type=int, help='Number of training epochs')
         parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
         parser.add_argument('--seed', type=int, help='Random seed for reproducibility')
-        parser.add_argument('--model_type', type=str, help='Type of model to train')
+        parser.add_argument('--dit_type', type=str, help='Type of model to train')
         parser.add_argument('--image_size', type=int, help='Size of input images')
         parser.add_argument('--data_path', type=str, help='Path to the training data')
+        parser.add_argument('--data_backend', type=str, choices=['pil', 'dali'])
         parser.add_argument('--vae', type=str, help='VAE model to use (ema or mse)')
         parser.add_argument('--use_latent', action='store_true')
 
-        parser.add_argument('--resume_exp', type=str, help='Timestamp of the experiment to resume')
-        parser.add_argument('--resume_epoch', type=int, help='Checkpoint step to load')
         parser.add_argument('--t_level', type=str)
         parser.add_argument('--reg_depth', type=int)
         parser.add_argument('--reg_depth_tea', type=int)
@@ -136,7 +146,10 @@ class DefaultConfig:
         parser.add_argument('--adaln_post_modulation', action='store_true' )
 
         parser.add_argument('--discription', type=str, help='Description of the experiment')
-
+        parser.add_argument('--dino_type', type=str)
+        parser.add_argument('--warmup_epochs', type=int)
+        parser.add_argument('--local_views', type=int)
+        parser.add_argument('--global_views', type=int)
 
         # for CoFlow
         parser.add_argument('--flow_type',type=str)
