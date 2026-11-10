@@ -12,6 +12,7 @@ from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import set_seed, broadcast_object_list
 from models.jit_clean import JiT_models
 from PIL import Image
+import numpy as np
 
 
 @torch.no_grad()
@@ -57,7 +58,7 @@ def main():
     broadcast_object_list(timestamp_list, from_process=0)
     cfg.timestamp = timestamp_list[0]
     cfg.results_dir = f'./exp/{cfg.timestamp}/'
-
+    cfg.local_batch_size = cfg.global_batch_size // accelerator.num_processes
     set_seed(cfg.seed, device_specific=True)
     # for acceleration
 
@@ -86,7 +87,8 @@ def main():
             PILToTensor(), # Faster than ToTensor
             # transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
         ])
-        dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=8, pin_memory=True, drop_last=True)
+    
+        dataloader = tud.DataLoader(dataset, batch_size=cfg.local_batch_size, shuffle=True, num_workers=8, pin_memory=True, drop_last=True)
 
     else: # DALI
         from datasets.dali_loader import JitDaliLoader
@@ -101,11 +103,11 @@ def main():
     # accelerator.register_for_checkpointing(ema) # By default, Accelerator doesn't save EMA, so register it. 
     
     # optimizer
-    effective_bs = cfg.batch_size * accelerator.num_processes
-    lr = cfg.blr * effective_bs / 256
+    # effective_bs = cfg.local_batch_size * accelerator.num_processes
+    lr = cfg.blr * cfg.global_batch_size / 256
     accelerator.print(f'Actual learning rate:{lr}')
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0)
     accelerator.print(optimizer)
 
 
@@ -114,10 +116,11 @@ def main():
         dataloader = accelerator.prepare(dataloader)
     
     # linear warmup, then constant
-    warmup_steps = cfg.warmup_epochs * len(dataloader)
-    lr_lambda = lambda cur_step : cur_step / warmup_steps if cur_step < warmup_steps else 1.0 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lr_lambda)
-
+    # warmup_steps = cfg.warmup_epochs * len(dataloader)
+    # lr_lambda = lambda cur_step : cur_step / warmup_steps if cur_step < warmup_steps else 1.0 
+    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lr_lambda)
+    cosine_value = lambda start,end, step, total_steps: end + 0.5 * (start-end) * (1 + np.cos(np.pi*step/total_steps))
+    total_steps, warmup_steps = cfg.epochs * len(dataloader), cfg.warmup_epochs * len(dataloader)
     model, optimizer,= accelerator.prepare( model,  optimizer)
     accelerator.print(f"Num proccess: {accelerator.num_processes}; Mixed precision: {accelerator.mixed_precision}")
     accelerator.print(f"Dataset size: {len(dataset)} images")
@@ -136,12 +139,18 @@ def main():
     ema.eval()
     start_epoch,train_steps, log_steps, running_loss, running_reg_loss, running_fm_loss = 1,0,0,0,0,0
     train_start_time = time()
-    rng = torch.Generator(accelerator.device).manual_seed(42) # for negative sampling.
 
     for epoch in range(start_epoch, cfg.epochs+1):
         accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch}/{cfg.epochs}...")
 
-        for x1, y in dataloader: 
+        for x1, y in dataloader:
+            #scheduler:
+            if train_steps < warmup_steps:
+                lr_now = lr * train_steps / (warmup_steps -1)
+            else:
+                lr_now = cosine_value(lr, cfg.min_lr, train_steps-warmup_steps, total_steps-warmup_steps)
+            for group in optimizer.param_groups:
+                group['lr'] = lr_now
             # x1: (B,C,H,W)
             # y: (B,)
             
@@ -175,9 +184,8 @@ def main():
             optimizer.zero_grad()
             accelerator.backward(loss)
             optimizer.step()
-            scheduler.step()
-            update_ema(ema, accelerator.unwrap_model(model), decay=cfg.ema_decay)
             train_steps += 1
+            update_ema(ema, accelerator.unwrap_model(model), decay=cfg.ema_decay)
             log_steps += 1
             running_fm_loss += fm_loss.detach()
             # running_reg_loss += reg_loss.detach()

@@ -23,7 +23,7 @@ accelerate launch \
     --image_size 224 \
     --blr 0.0005 \
     --ema_decay 0.996 \
-    --batch_size 128 \
+    --global_batch_size 1024 \
     --local_views 10 \
     --global_views 2 \
     --data_backend dali \

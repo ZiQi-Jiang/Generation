@@ -36,15 +36,15 @@ class DefaultConfig:
         # =================================================================
         # Basic Training Parameters
         # =================================================================
-        self.batch_size = 128
+        self.global_batch_size = 1024
         self.epochs = 40
         self.num_classes = 1000
         self.seed = 0
         self.dit_type = 'JiT-B/16' 
         self.image_size = 256 
         self.noise_scale = self.image_size / 256 * 1.0
-        self.blr = 5e-5
-        self.warmup_epochs = 5
+        self.blr = 5e-4
+        self.warmup_epochs = 10
         self.data_backend = 'pil' # pil / dali  
         # for logit-normal timestep sampling
         self.P_mean = -0.8
@@ -122,7 +122,7 @@ class DefaultConfig:
         """Parse command line arguments and update configuration"""
         parser = argparse.ArgumentParser(description='Train model with configurable parameters')
         
-        parser.add_argument('--batch_size', type=int, help='Batch size for training')
+        parser.add_argument('--global_batch_size', type=int, help='Batch size for training')
         parser.add_argument('--epochs', type=int, help='Number of training epochs')
         parser.add_argument('--num_classes', type=int, help='Number of classes in the dataset')
         parser.add_argument('--seed', type=int, help='Random seed for reproducibility')

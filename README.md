@@ -55,13 +55,12 @@ accelerate launch --multi_gpu --num_processes 8 \
     --dit_type JiT-B/16 \
     --data_path ./data/imagenet/images/train \
     --image_size 256 \
-    --batch_size 32 \
+    --global_batch_size 1024 \
     --epochs 40
 ```
 
 Training configuration is defined in `config.py`.
-`--batch_size` is the local batch size per process.
-Training outputs are saved under `exp/<timestamp>/`.
+`--global_batch_size` is the total training batch size across all GPUs.
 
 For cached SiT training, `--use_latent` selects the LMDB dataset.
 Its location is configured through `latent_path` in `config.py`.

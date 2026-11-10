@@ -42,8 +42,8 @@ class DinoDaliLoader:
         labels = [dataset.samples[i][1] for i in order]
 
         self.view_names = [f'view{i}' for i in range(2+cfg.local_views)]
-        self.num_batches = len(dataset) //(cfg.batch_size * accelerator.num_processes)
-        pipeline = dino_pipeline(files=files, labels=labels, rank=accelerator.process_index, world_size=accelerator.num_processes, cfg=cfg, batch_size=cfg.batch_size, device_id=accelerator.device.index, num_threads=4, prefetch_queue_depth=2, seed=cfg.seed + accelerator.process_index)
+        self.num_batches = len(dataset) //cfg.global_batch_size 
+        pipeline = dino_pipeline(files=files, labels=labels, rank=accelerator.process_index, world_size=accelerator.num_processes, cfg=cfg, batch_size=cfg.local_batch_size, device_id=accelerator.device.index, num_threads=4, prefetch_queue_depth=2, seed=cfg.seed + accelerator.process_index)
         self.iterator = DALIGenericIterator([pipeline], output_map=self.view_names+['label'], reader_name='Reader', auto_reset=True, last_batch_policy=LastBatchPolicy.FILL, prepare_first_batch=False)
 
     def __len__(self):
@@ -73,9 +73,9 @@ class JitDaliLoader:
         order = np.random.default_rng(cfg.seed).permutation(len(dataset))
         files = [dataset.samples[i][0] for i in order]
         labels = [dataset.samples[i][1] for i in order]   
-        self.num_batches = len(dataset) //(cfg.batch_size * accelerator.num_processes)
+        self.num_batches = len(dataset) //cfg.global_batch_size 
 
-        pipeline = jit_pipeline(files=files, labels=labels, rank=accelerator.process_index, world_size=accelerator.num_processes, cfg=cfg, batch_size=cfg.batch_size, device_id=accelerator.device.index, num_threads=4, prefetch_queue_depth=2, seed=cfg.seed + accelerator.process_index)
+        pipeline = jit_pipeline(files=files, labels=labels, rank=accelerator.process_index, world_size=accelerator.num_processes, cfg=cfg, batch_size=cfg.local_batch_size, device_id=accelerator.device.index, num_threads=4, prefetch_queue_depth=2, seed=cfg.seed + accelerator.process_index)
         self.iterator = DALIGenericIterator([pipeline], output_map=['image', 'label'], reader_name='Reader', auto_reset=True, last_batch_policy=LastBatchPolicy.FILL, prepare_first_batch=False)
 
     def __len__(self):

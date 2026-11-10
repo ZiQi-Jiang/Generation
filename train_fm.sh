@@ -16,7 +16,7 @@ accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
   --timestamp "$timestamp" \
   --epochs "$epochs" \
   --ema_decay 0.9999 \
-  --batch_size 128 \
+  --global_batch_size 1024 \
   --data_backend dali \
   --data_path ./data/imagenet/images/train
 

@@ -52,7 +52,7 @@ def main():
     broadcast_object_list(timestamp_list, from_process=0)
     cfg.timestamp = timestamp_list[0]
     cfg.results_dir = f'./exp/{cfg.timestamp}/'
-
+    cfg.local_batch_size = cfg.global_batch_size // accelerator.num_processes
     set_seed(cfg.seed, device_specific=True)
 
     torch.backends.cudnn.benchmark = True
@@ -73,7 +73,7 @@ def main():
     dataset = ImageFolder(cfg.data_path)
     if cfg.data_backend == 'pil':
         dataset.transform =  DINOCropAugmentation(cfg)
-        dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=10, pin_memory=True, drop_last=True) 
+        dataloader = tud.DataLoader(dataset, batch_size=cfg.local_batch_size, shuffle=True, num_workers=10, pin_memory=True, drop_last=True) 
     else:
         from datasets.dali_loader import DinoDaliLoader
         dataloader = DinoDaliLoader(dataset, cfg, accelerator)
@@ -85,8 +85,7 @@ def main():
     # accelerator.register_for_checkpointing(ema) # By default, Accelerator doesn't save EMA, so register it. 
     
     # optimizer
-    effective_bs = cfg.batch_size * accelerator.num_processes
-    lr = cfg.blr * effective_bs / 256
+    lr = cfg.blr * cfg.global_batch_size / 256
     accelerator.print(f'Actual learning rate:{lr}')
 
     decay, no_decay = [], []
@@ -126,15 +125,14 @@ def main():
     for epoch in range(start_epoch, cfg.epochs+1):
         accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch}/{cfg.epochs}...")
         tea_temp = np.interp(epoch-1, [0, cfg.warmup_teacher_temp_epochs -1], [cfg.warmup_teacher_temp, cfg.teacher_temp])
-        for x, _ in dataloader: 
-
+        for x, _ in dataloader:
             if train_steps < warmup_steps:
                 lr_now = lr * train_steps / (warmup_steps -1)
             else:
                 lr_now = cosine_value(lr, cfg.min_lr, train_steps-warmup_steps, total_steps-warmup_steps)
             for group in optimizer.param_groups: 
                 group['lr'] = lr_now
-            optimizer.param_groups[0]['weight_decay'] = cosine_value(cfg.weight_decay, cfg.weight_decay_end, train_steps, total_steps)
+            optimizer.param_groups[0]['weight_decay'] = cosine_value(cfg.weight_decay, cfg.weight_decay_end, train_steps, total_steps) 
             ema_decay = cosine_value(cfg.ema_decay, 1.0, train_steps, total_steps)
             global_views = torch.cat(x[:cfg.global_views],dim=0) #[2B, 3, 224, 224]
             local_views =  torch.cat(x[cfg.global_views:], dim=0) #[10B, 3, 96, 96]
@@ -160,8 +158,9 @@ def main():
                 head.prototypes.grad = None
                 head.prototype_scale.grad = None
             optimizer.step()
-            update_ema(ema, accelerator.unwrap_model(model), decay=ema_decay)
             train_steps += 1
+
+            update_ema(ema, accelerator.unwrap_model(model), decay=ema_decay)
             log_steps += 1
             # running_reg_loss += reg_loss.detach()
             running_loss += loss.detach()  # only compare the standard FM loss.
