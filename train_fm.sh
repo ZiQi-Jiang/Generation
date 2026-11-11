@@ -9,7 +9,7 @@ conda activate sslfm
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
 timestamp=$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)
-epochs=200
+epochs=80
 accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
   train_jit.py \
   --dit_type 'JiT-B/16_no_incontext' \
@@ -22,7 +22,7 @@ accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
   --data_path ./data/imagenet/images/train
 
 
-for epoch in 50 100 150 200; do 
+for epoch in 40 80; do 
   # FID evaluation
   accelerate launch \
       --multi_gpu \

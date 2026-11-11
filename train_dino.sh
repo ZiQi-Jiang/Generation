@@ -9,7 +9,7 @@ conda activate sslfm
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
 timestamp=$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)
-epochs=800
+epochs=80
 
 accelerate launch \
     --multi_gpu \
@@ -30,18 +30,18 @@ accelerate launch \
     --data_path ./data/imagenet/images/train
 
 
+for epoch in 40 80; do 
+    # Evaluate DINO
+    accelerate launch \
+        --multi_gpu \
+        --num_processes 8 \
+        --mixed_precision bf16 \
+        linear_probing/knn_dino.py \
+        --exp dino/"$timestamp" \
+        --epoch "$epoch" \
+        --data_path ./data/imagenet/images
 
-# Evaluate DINO
-accelerate launch \
-    --multi_gpu \
-    --num_processes 8 \
-    --mixed_precision bf16 \
-    linear_probing/knn_dino.py \
-    --exp dino/"$timestamp" \
-    --epoch "$epochs" \
-    --data_path ./data/imagenet/images
-
-
+done
 # Official
 # accelerate launch --multi_gpu --num_processes 8 --mixed_precision no \
 #   linear_probing/knn_dino.py \

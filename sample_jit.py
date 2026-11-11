@@ -159,8 +159,8 @@ def main(sample_args):
     
     # load model and checkpoint
     model = JiT_models[train_cfg.dit_type](input_size=train_cfg.image_size, in_channels=3, num_classes=train_cfg.num_classes, mlp_ratio=4)
-
-    model.load_state_dict(state_dict['ema'])
+    weights = state_dict['jit_ema'] if 'jit_ema' in state_dict else state_dict['ema']
+    model.load_state_dict(weights)
     # new_state_dict = {}
     # for k, v in state_dict['model_ema1'].items():
     #     if k.startswith('net.'):

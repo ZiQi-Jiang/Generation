@@ -92,7 +92,7 @@ def main(cfg):
         model = ViT(img_size=224, patch_size=16, num_classes=0, dim=384, depth=12, num_heads=6, mlp_ratio=4, drop_path_rate=0.1, qkv_bias=True, qk_norm=False)
         if cfg.exp:
             state_dict = torch.load(cfg.checkpoint_path, map_location='cpu',weights_only=False)
-            weights = state_dict['ema']
+            weights = state_dict['dino_ema'] if 'dino_ema' in state_dict else state_dict['ema']
         else:
             model.head = nn.Identity()
             state_dict = torch.load(cfg.checkpoint_path, map_location='cpu',weights_only=True)
@@ -125,7 +125,7 @@ def main(cfg):
             "temperature": cfg.temperature,
             "top1": acc,
             "top5": acc5,
-            "image_size": cfg.image_size,
+            "image_size": cfg.dino_image_size,
             "num_train": all_labels.shape[0],
             'exp': cfg.exp,
             'base model epoch': cfg.epoch,
@@ -144,7 +144,7 @@ if __name__ == '__main__':
 
     cfg = parser.parse_args()
     cfg.project_dir = Path(__file__).resolve().parents[1]
-    cfg.image_size =  224
+    cfg.dino_image_size =  224
     cfg.num_classes = 1000
     cfg.local_batch_size = 128
     cfg.k = 20
@@ -153,7 +153,7 @@ if __name__ == '__main__':
     if cfg.exp: # from our trained model, instead of official checkpoint
         train_cfg = DefaultConfig.from_json(f'{cfg.project_dir}/exp/{cfg.exp}/config.json')
         cfg.dino_type = train_cfg.dino_type
-        cfg.image_size = train_cfg.image_size
+        cfg.dino_image_size = train_cfg.dino_image_size
         cfg.num_classes = train_cfg.num_classes
         cfg.checkpoint_path = f'{cfg.project_dir}/exp/{cfg.exp}/epoch_{cfg.epoch:03d}.pth'
     else:

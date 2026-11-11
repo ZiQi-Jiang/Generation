@@ -42,6 +42,7 @@ class DefaultConfig:
         self.seed = 0
         self.dit_type = 'JiT-B/16' 
         self.image_size = 256 
+        self.dino_image_size = 224
         self.noise_scale = self.image_size / 256 * 1.0
         self.blr = 5e-4
         self.warmup_epochs = 10
@@ -51,6 +52,7 @@ class DefaultConfig:
         self.P_mean = -0.8
         self.P_std =  0.8
         self.ema_decay = 0.9999
+        self.dino_ema_decay = 0.996
         # saving and logging
         beijing_tz = datetime.timezone(datetime.timedelta(hours=8))  # UTC+8, Beijing time
         self.timestamp = datetime.datetime.now(beijing_tz).strftime("%Y%m%d_%H%M%S")
@@ -60,7 +62,7 @@ class DefaultConfig:
         
         # other helper parameters (only changed here)
         self.log_step_freq = 100
-        self.save_epoch_freq = 50
+        self.save_epoch_freq = 40
         self.use_latent = False # For SiT acceleration
 
         # our project
@@ -152,7 +154,7 @@ class DefaultConfig:
         parser.add_argument('--local_views', type=int)
         parser.add_argument('--global_views', type=int)
         parser.add_argument('--drop_class', type=float)
-
+        parser.add_argument('--dino_ema_decay', type=float)
         # for CoFlow
         parser.add_argument('--flow_type',type=str)
         #for sampling

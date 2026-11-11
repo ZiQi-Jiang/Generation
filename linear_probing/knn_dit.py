@@ -110,7 +110,7 @@ def main(cfg):
         model = JiT_models[cfg.dit_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
         if cfg.exp:
             state_dict = torch.load(cfg.checkpoint_path, map_location='cpu',weights_only=False)
-            weights = state_dict['ema']
+            weights = state_dict['jit_ema'] if 'jit_ema' in state_dict else state_dict['ema']
             cfg.epoch = state_dict['epoch']
         else:
             state_dict = torch.load(f'{PROJECT_DIR}/data/official_ckpts/jit_h_16.pt', map_location='cpu',weights_only=False)
