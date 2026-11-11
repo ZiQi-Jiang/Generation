@@ -178,7 +178,7 @@ def main():
             x1 = 2.0 * raw_x - 1.0
 
             # dropout labels, here we use constant dropout ratio as 0.1
-            drop_ids = torch.rand(raw_y.shape[0], device=raw_y.device) < 0.1
+            drop_ids = torch.rand(raw_y.shape[0], device=raw_y.device) < cfg.drop_class
             y =  torch.where(drop_ids, cfg.num_classes, raw_y) # label dropout for cfg.
 
             if cfg.reg_type == 'repa':

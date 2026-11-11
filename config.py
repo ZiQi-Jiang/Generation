@@ -47,6 +47,7 @@ class DefaultConfig:
         self.warmup_epochs = 10
         self.data_backend = 'pil' # pil / dali  
         # for logit-normal timestep sampling
+        self.drop_class = 0.1 # for cfg trianing
         self.P_mean = -0.8
         self.P_std =  0.8
         self.ema_decay = 0.9999
@@ -150,6 +151,7 @@ class DefaultConfig:
         parser.add_argument('--warmup_epochs', type=int)
         parser.add_argument('--local_views', type=int)
         parser.add_argument('--global_views', type=int)
+        parser.add_argument('--drop_class', type=float)
 
         # for CoFlow
         parser.add_argument('--flow_type',type=str)

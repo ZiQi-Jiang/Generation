@@ -13,11 +13,12 @@ epochs=200
 accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
   train_jit.py \
   --dit_type 'JiT-B/16_no_incontext' \
-  --timestamp "$timestamp" \
+  --timestamp jit/"$timestamp" \
   --epochs "$epochs" \
   --ema_decay 0.9999 \
   --global_batch_size 1024 \
   --data_backend dali \
+  --drop_class 1.0 \
   --data_path ./data/imagenet/images/train
 
 
@@ -28,7 +29,7 @@ for epoch in 50 100 150 200; do
       --num_processes 8 \
       --mixed_precision bf16 \
       sample_jit.py \
-      --exp "$timestamp" \
+      --exp jit/"$timestamp" \
       --epoch "$epoch" \
       --num_samples 50000 \
       --sample_steps 50 \
@@ -41,7 +42,7 @@ for epoch in 50 100 150 200; do
           --num_processes 8 \
           --mixed_precision no \
           linear_probing/knn_dit.py \
-          --exp "$timestamp" \
+          --exp jit/"$timestamp" \
           --epoch "$epoch" \
           --data_path ./data/imagenet/images \
           --t "$t" \

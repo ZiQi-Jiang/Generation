@@ -159,7 +159,7 @@ def main():
             x1 = 2.0 * x1 - 1.0  
 
             # dropout labels, here we use constant dropout ratio as 0.1
-            drop_ids = torch.rand(y.shape[0], device=y.device) < 0.1
+            drop_ids = torch.rand(y.shape[0], device=y.device) < cfg.drop_class
             y =  torch.where(drop_ids, cfg.num_classes, y)
 
             with accelerator.autocast():

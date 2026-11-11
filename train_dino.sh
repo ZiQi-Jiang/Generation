@@ -16,7 +16,7 @@ accelerate launch \
     --num_processes 8 \
     --mixed_precision bf16 \
     train_dino.py \
-    --timestamp "$timestamp" \
+    --timestamp dino/"$timestamp" \
     --dino_type vit_s_16 \
     --epochs "$epochs" \
     --warmup_epochs 10 \
@@ -37,7 +37,7 @@ accelerate launch \
     --num_processes 8 \
     --mixed_precision bf16 \
     linear_probing/knn_dino.py \
-    --exp "$timestamp" \
+    --exp dino/"$timestamp" \
     --epoch "$epochs" \
     --data_path ./data/imagenet/images
 

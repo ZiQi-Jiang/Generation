@@ -61,6 +61,8 @@ def sample(model,  accelerator, sample_dir, sample_args,train_cfg):
     num_class = train_cfg.num_classes
     class_labels_global = np.arange(0, num_class).repeat(sample_args.num_samples // num_class) #(50000,)
     class_labels_global = np.hstack([class_labels_global, np.zeros(50000)]) # assure the last step 
+    if train_cfg.drop_class == 1.0:
+        class_labels_global.fill(num_class)
     num_steps = sample_args.num_samples // (sample_args.batch_size * accelerator.num_processes) + 1
     for i in range(num_steps + 1):
         accelerator.print(f'Generatino Step: {i}/{num_steps}')
