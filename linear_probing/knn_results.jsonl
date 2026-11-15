@@ -85,3 +85,7 @@
 {"dit_type": "SiT", "t": 0.7, "layer_idx": 3, "k": 20, "temperature": 0.07, "top1": 0.05068, "top5": 0.11084, "image_size": 256, "num_train": 1281167, "exp": null, "base model epoch": null}
 {"dit_type": "SiT", "t": 0.7, "layer_idx": 7, "k": 20, "temperature": 0.07, "top1": 0.0261, "top5": 0.06156, "image_size": 256, "num_train": 1281167, "exp": null, "base model epoch": null}
 {"dit_type": "SiT", "t": 0.7, "layer_idx": 11, "k": 20, "temperature": 0.07, "top1": 0.02632, "top5": 0.06502, "image_size": 256, "num_train": 1281167, "exp": null, "base model epoch": null}
+{"dit_type": "SiT", "t": 0.7, "layer_idx": 15, "k": 20, "temperature": 0.07, "top1": 0.07666, "top5": 0.15914, "image_size": 256, "num_train": 1281167, "exp": null, "base model epoch": null}
+{"dit_type": "SiT", "t": 0.7, "layer_idx": 17, "k": 20, "temperature": 0.07, "top1": 0.1493, "top5": 0.28298, "image_size": 256, "num_train": 1281167, "exp": null, "base model epoch": null}
+{"dit_type": "SiT", "t": 0.7, "layer_idx": 23, "k": 20, "temperature": 0.07, "top1": 0.14016, "top5": 0.2586, "image_size": 256, "num_train": 1281167, "exp": null, "base model epoch": null}
+{"dit_type": "SiT", "t": 0.7, "layer_idx": 27, "k": 20, "temperature": 0.07, "top1": 0.1899, "top5": 0.34004, "image_size": 256, "num_train": 1281167, "exp": null, "base model epoch": null}

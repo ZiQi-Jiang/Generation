@@ -19,11 +19,6 @@ accelerate launch \
     --timestamp dino/"$timestamp" \
     --dino_type vit_s_16 \
     --epochs "$epochs" \
-    --warmup_epochs 10 \
-    --image_size 224 \
-    --blr 0.0005 \
-    --ema_decay 0.996 \
-    --global_batch_size 1024 \
     --local_views 10 \
     --global_views 2 \
     --data_backend dali \
@@ -40,7 +35,6 @@ for epoch in 40 80; do
         --exp dino/"$timestamp" \
         --epoch "$epoch" \
         --data_path ./data/imagenet/images
-
 done
 # Official
 # accelerate launch --multi_gpu --num_processes 8 --mixed_precision no \

@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 
 export PYTHONPATH="$(dirname "$PWD"):${PYTHONPATH:-}"
 
-for dit_type in SiT SRA SelfFlow; do
+for dit_type in SRA SelfFlow; do
     for t in 0.9 0.8 0.7 0.6; do
         for layer_idx in 3 7 11 15 17 23 27; do
             accelerate launch \

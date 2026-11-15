@@ -107,7 +107,7 @@ def main():
     lr = cfg.blr * cfg.global_batch_size / 256
     accelerator.print(f'Actual learning rate:{lr}')
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0) # dino use (0.9, 0.999)
     accelerator.print(optimizer)
 
 
@@ -148,7 +148,8 @@ def main():
             if train_steps < warmup_steps:
                 lr_now = lr * train_steps / (warmup_steps -1)
             else:
-                lr_now = cosine_value(lr, cfg.min_lr, train_steps-warmup_steps, total_steps-warmup_steps)
+                # lr_now = cosine_value(lr, cfg.min_lr, train_steps-warmup_steps, total_steps-warmup_steps) # dino
+                lr_now = lr
             for group in optimizer.param_groups:
                 group['lr'] = lr_now
             # x1: (B,C,H,W)

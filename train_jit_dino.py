@@ -106,17 +106,19 @@ def main():
     jit_model.blocks[cfg.reg_depth - 1].register_forward_hook(save_feature)
     # optimizer
     # effective_bs = cfg.local_batch_size * accelerator.num_processes
-    lr = cfg.blr * cfg.global_batch_size / 256
-    accelerator.print(f'Actual learning rate:{lr}')
+    jit_lr = cfg.blr * cfg.global_batch_size / 256
+    dino_lr = cfg.dino_blr * cfg.global_batch_size / 256
 
-    jit_optimizer = torch.optim.AdamW(list(jit_model.parameters()) + list(repa_projector.parameters()), lr=lr, betas=(0.9, 0.999), weight_decay=0)
+    accelerator.print(f'JiT learning rate: {jit_lr}; DINO learning rate: {dino_lr}')
+
+    jit_optimizer = torch.optim.AdamW(list(jit_model.parameters()) + list(repa_projector.parameters()), lr=jit_lr, betas=(0.9, 0.95), weight_decay=0)
     decay, no_decay = [], []
     for name, param in dino_model.named_parameters():
         if param.ndim == 1 or name.endswith('.bias'):
             no_decay.append(param)
         else:
             decay.append(param)
-    dino_optimizer = torch.optim.AdamW([{'params': decay, 'weight_decay': cfg.weight_decay}, {'params': no_decay, 'weight_decay': 0.0}], lr=lr, betas=(0.9, 0.999))
+    dino_optimizer = torch.optim.AdamW([{'params': decay, 'weight_decay': cfg.weight_decay}, {'params': no_decay, 'weight_decay': 0.0}], lr=dino_lr, betas=(0.9, 0.999))
 
 
     # model = torch.compile(model)
@@ -161,14 +163,16 @@ def main():
         for images, y in dataloader:
             #scheduler:
             if train_steps < warmup_steps:
-                lr_now = lr * train_steps / (warmup_steps -1)
+                jit_lr_now = jit_lr * train_steps / (warmup_steps -1)
+                dino_lr_now = dino_lr * train_steps / (warmup_steps -1)
             else:
-                lr_now = cosine_value(lr, cfg.min_lr, train_steps-warmup_steps, total_steps-warmup_steps)
+                jit_lr_now = jit_lr
+                dino_lr_now = cosine_value(dino_lr, cfg.min_lr, train_steps-warmup_steps, total_steps-warmup_steps)
             
             for group in jit_optimizer.param_groups:
-                group['lr'] = lr_now
+                group['lr'] = jit_lr_now
             for group in dino_optimizer.param_groups:
-                group['lr'] = lr_now
+                group['lr'] = dino_lr_now
 
             dino_optimizer.param_groups[0]['weight_decay'] = cosine_value(cfg.weight_decay, cfg.weight_decay_end, train_steps, total_steps) 
             dino_ema_decay = cosine_value(cfg.dino_ema_decay, 1.0, train_steps, total_steps)

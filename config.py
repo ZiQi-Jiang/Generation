@@ -44,7 +44,8 @@ class DefaultConfig:
         self.image_size = 256 
         self.dino_image_size = 224
         self.noise_scale = self.image_size / 256 * 1.0
-        self.blr = 5e-4
+        self.blr = 5e-5
+        self.dino_blr = 5e-4
         self.warmup_epochs = 10
         self.data_backend = 'pil' # pil / dali  
         # for logit-normal timestep sampling
@@ -86,8 +87,8 @@ class DefaultConfig:
         self.min_lr = 1e-5
         self.freeze_last_layer = 1
         # for sra
-        self.t_max = 0.2
-        self.reg_depth_tea = 8
+        self.sra_t_max = 0.2
+        self.sra_depth_tea = 8
 
         # for frequency
         # self.jacobian = 'repa' #['repa', 'freq']

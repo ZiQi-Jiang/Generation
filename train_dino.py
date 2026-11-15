@@ -78,14 +78,14 @@ def main():
         from datasets.dali_loader import DinoDaliLoader
         dataloader = DinoDaliLoader(dataset, cfg, accelerator)
     if cfg.dino_type == 'vit_s_16':
-        model = ViT(img_size=224, patch_size=16, num_classes=0, dim=384, depth=12, num_heads=6, mlp_ratio=4, drop_path_rate=0.1, qkv_bias=True, qk_norm=False)
-        ema = ViT(img_size=224, patch_size=16, num_classes=0, dim=384, depth=12, num_heads=6, mlp_ratio=4, drop_path_rate=0.0, qkv_bias=True, qk_norm=False)
+        model = ViT(img_size=cfg.dino_image_size, patch_size=16, num_classes=0, dim=384, depth=12, num_heads=6, mlp_ratio=4, drop_path_rate=0.1, qkv_bias=True, qk_norm=False)
+        ema = ViT(img_size=cfg.dino_image_size, patch_size=16, num_classes=0, dim=384, depth=12, num_heads=6, mlp_ratio=4, drop_path_rate=0.0, qkv_bias=True, qk_norm=False)
         ema = ema.to(accelerator.device).requires_grad_(False)
     
     # accelerator.register_for_checkpointing(ema) # By default, Accelerator doesn't save EMA, so register it. 
     
     # optimizer
-    lr = cfg.blr * cfg.global_batch_size / 256
+    lr = cfg.dino_blr * cfg.global_batch_size / 256
     accelerator.print(f'Actual learning rate:{lr}')
 
     decay, no_decay = [], []
@@ -133,7 +133,7 @@ def main():
             for group in optimizer.param_groups: 
                 group['lr'] = lr_now
             optimizer.param_groups[0]['weight_decay'] = cosine_value(cfg.weight_decay, cfg.weight_decay_end, train_steps, total_steps) 
-            ema_decay = cosine_value(cfg.ema_decay, 1.0, train_steps, total_steps)
+            dino_ema_decay = cosine_value(cfg.dino_ema_decay, 1.0, train_steps, total_steps)
             global_views = torch.cat(x[:cfg.global_views],dim=0) #[2B, 3, 224, 224]
             local_views =  torch.cat(x[cfg.global_views:], dim=0) #[10B, 3, 96, 96]
             with accelerator.autocast():
@@ -160,7 +160,7 @@ def main():
             optimizer.step()
             train_steps += 1
 
-            update_ema(ema, accelerator.unwrap_model(model), decay=ema_decay)
+            update_ema(ema, accelerator.unwrap_model(model), decay=dino_ema_decay)
             log_steps += 1
             # running_reg_loss += reg_loss.detach()
             running_loss += loss.detach()  # only compare the standard FM loss.
