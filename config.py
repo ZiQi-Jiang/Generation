@@ -90,6 +90,10 @@ class DefaultConfig:
         self.sra_t_max = 0.2
         self.sra_depth_tea = 8
 
+        # for selfflow
+        self.selfflow_mask_ratio = 0.25
+        self.selfflow_depth_tea = 8
+        
         # for frequency
         # self.jacobian = 'repa' #['repa', 'freq']
         # self.freq_w_type = 'rgb' #['rgb', channel]

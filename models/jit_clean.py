@@ -260,6 +260,7 @@ class JiT(nn.Module):
     
 
 
+
 def JiT_S_16(**kwargs):
     return JiT(depth=12, hidden_size=384, num_heads=6, 
                 bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs)
@@ -309,5 +310,94 @@ JiT_models = {
     'JiT-S/16_no_incontext': JiT_S_16_no_incontext
 }
 
-# def SiT_S_2(**kwargs):
-    # return SiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+
+def modulate_token(x, shift, scale):
+    # x:(B,N,D), shift:(B,N,D), scale:(B,N,D)
+    return x * (1 + scale) + shift 
+################################################# Selfflow ##########################################
+
+
+
+class SelfFlowBlock(nn.Module):
+    def __init__(self, block):
+        super().__init__()
+        self.norm1 = block.norm1
+        self.norm2 = block.norm2
+        self.attn = block.attn
+        self.mlp = block.mlp
+        self.adaLN_modulation = block.adaLN_modulation
+
+    @torch.compile
+    def forward(self, block, x, c, feat_rope):
+        modulation = self.adaLN_modulation(c)
+        if modulation.ndim == 2:
+            modulation = modulation[:, None, :] # for ema teacher
+        
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation.chunk(6, dim=-1) #each is (B, N, D)
+
+        x = x + gate_msa * self.attn(modulate_token(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
+        x = x + gate_mlp * self.mlp(modulate_token(self.norm2(x), shift_mlp, scale_mlp))
+
+        return x
+
+
+class SelfFlow(JiT):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.blocks = nn.ModuleList([ SelfFlowBlock(block) for block in self.blocks])
+
+
+    def final_foward(self,x,c):
+        """
+        x: (B, N, D)
+        c: (B, D)
+        """
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1) # (B,N)
+        x = modulate_token(self.norm_final(x), shift, scale)
+        x = self.linear(x)
+        return x     
+    
+    def forward(self, x, t, y):
+        # x: (B, N, D), t:(B, N), y:(B)
+        if t.ndim == 1:
+            return super().forward(x, t, y) # jit forward
+        
+        b, n = t.shape 
+        t_emb = self.t_embedder(t.reshape(-1).reshape(b, n , -1)) # (B,N, D)
+        y_emb = self.y_embedder(y) # (B,D)
+        c = t_emb + y_emb[:, None] #[B, N, D]
+
+        x = self.x_embedder(x) # (B,N,D), bottleck layer that will compress information.
+        x += self.pos_embed
+
+        for i, block in enumerate(self.blocks):
+            if  self.in_context_len > 0 and i == self.in_context_start:
+                # decouple the in context tokens into 2 parts: label embed and a residual(pos emb).
+                in_context_tokens = repeat(y_emb, 'b d -> b l d', l = self.in_context_len)
+                in_context_tokens = in_context_tokens +  self.in_context_posemb 
+                x = torch.cat([in_context_tokens, x],dim=1) # (B, N+L, D)
+                
+                in_context_c = repeat(c.mean(dim=1,keepdim=True), 'b 1 d -> b l d', l = self.in_context_len )
+                c = torch.cat([in_context_c, c], dim=1) # (B, N+L, D)
+            x = block(x, c, feat_rope=self.feat_rope if i < self.in_context_start else self.feat_rope_incontext)
+
+
+        x = x[:, self.in_context_len:,:] # back to (B, N, D)
+        c = c[:, self.in_context_len:,:]
+        x = self.final_forward(x, c) # (B, N, D)
+        output = self.unpatchify(x) # (B, C, H, W
+        return output       
+    
+def SelfFlow_B_16(**kwargs):
+    return SelfFlow(depth=12, hidden_size=768, num_heads=12,
+               bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs)
+
+
+def SelfFlow_B_16_no_incontext(**kwargs):
+    return SelfFlow(depth=12, hidden_size=768, num_heads=12,
+               bottleneck_dim=128, in_context_len=0, in_context_start=100, patch_size=16, **kwargs)
+
+SelfFlow_models = {
+    'JiT-B/16': SelfFlow_B_16,
+    'JiT-B/16_no_incontext': SelfFlow_B_16_no_incontext,
+}

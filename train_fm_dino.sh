@@ -39,6 +39,15 @@ accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
   --drop_class 1.0 \
   --data_path ./data/imagenet/images/train
 
+
+accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
+  train_jit_selfflow.py \
+  --dit_type 'JiT-B/16' \
+  --timestamp jit_selfflow/"$timestamp" \
+  --epochs "$epochs" \
+  --data_backend dali \
+  --drop_class 1.0 \
+  --data_path ./data/imagenet/images/train
 # for epoch in 40 80; do 
 #   # FID evaluation
 #   accelerate launch \
