@@ -328,7 +328,7 @@ class SelfFlowBlock(nn.Module):
         self.adaLN_modulation = block.adaLN_modulation
 
     @torch.compile
-    def forward(self, block, x, c, feat_rope):
+    def forward(self, x, c, feat_rope):
         modulation = self.adaLN_modulation(c)
         if modulation.ndim == 2:
             modulation = modulation[:, None, :] # for ema teacher
@@ -347,23 +347,23 @@ class SelfFlow(JiT):
         self.blocks = nn.ModuleList([ SelfFlowBlock(block) for block in self.blocks])
 
 
-    def final_foward(self,x,c):
+    def final_forward(self,x,c):
         """
         x: (B, N, D)
         c: (B, D)
         """
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1) # (B,N)
-        x = modulate_token(self.norm_final(x), shift, scale)
-        x = self.linear(x)
+        shift, scale = self.final_layer.adaLN_modulation(c).chunk(2, dim=-1) # (B,N)
+        x = modulate_token(self.final_layer.norm_final(x), shift, scale)
+        x = self.final_layer.linear(x)
         return x     
     
-    def forward(self, x, t, y):
+    def forward(self, x, t, y, feat_rope=None):
         # x: (B, N, D), t:(B, N), y:(B)
         if t.ndim == 1:
             return super().forward(x, t, y) # jit forward
         
         b, n = t.shape 
-        t_emb = self.t_embedder(t.reshape(-1).reshape(b, n , -1)) # (B,N, D)
+        t_emb = self.t_embedder(t.reshape(-1)).reshape(b, n , -1) # (B,N, D)
         y_emb = self.y_embedder(y) # (B,D)
         c = t_emb + y_emb[:, None] #[B, N, D]
 
