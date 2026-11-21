@@ -187,7 +187,3 @@ class DINOHead(nn.Module):
         return logits
     
     
-    
-        
-
-

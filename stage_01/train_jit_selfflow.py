@@ -16,7 +16,7 @@ from models.jit_clean import SelfFlow_models
 from PIL import Image
 import numpy as np
 from models.dino_vit import ViT
-from train_dino import dino_loss as compute_dino_loss
+from stage_01.train_dino import dino_loss as compute_dino_loss
 from einops import repeat
 
 

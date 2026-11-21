@@ -16,8 +16,8 @@ from models.jit_clean import JiT_models
 from PIL import Image
 import numpy as np
 from models.dino_vit import ViT
-from train_dino import dino_loss as compute_dino_loss
-
+from stage_01.train_dino import dino_loss as compute_dino_loss
+from datasets.dali_loader import JitDaliLoader
 @torch.no_grad()
 def update_ema(ema_model, model, decay=0.9999):
     """
@@ -84,8 +84,8 @@ def main():
     dataset = ImageFolder(cfg.data_path)
     assert cfg.data_backend == 'dali'
 
-    from datasets.dali_loader import DinoJitDaliLoader
-    dataloader = DinoJitDaliLoader(dataset, cfg, accelerator)
+    from datasets.dali_loader import JitDaliLoader
+    dataloader = JitDaliLoader(dataset, cfg, accelerator)
 
     # TODO: proj_drop 
     jit_model = JiT_models[cfg.dit_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
@@ -94,8 +94,12 @@ def main():
         param.requires_grad_(False)
     if cfg.dino_type == 'vit_s_16':
         dino_model = ViT(img_size=cfg.dino_image_size, patch_size=16, num_classes=0, dim=384, depth=12, num_heads=6, mlp_ratio=4, drop_path_rate=0.1, qkv_bias=True, qk_norm=False)      
-        dino_ema = ViT(img_size=cfg.dino_image_size, patch_size=16, num_classes=0, dim=384, depth=12, num_heads=6, mlp_ratio=4, drop_path_rate=0.0, qkv_bias=True, qk_norm=False)
-        dino_ema = dino_ema.to(accelerator.device).requires_grad_(False)
+        dino_model.head = nn.Identity()
+        weights = torch.load('data/official_ckpts/dino_vits16.pt', map_location='cpu',weights_only=True,)
+        weights = {key.replace('patch_embed.proj', 'patch_emb.conv').replace('mlp.', 'ffn.'): value for key, value in weights.items()}
+        dino_model.load_state_dict(weights, strict=True)
+        dino_model = dino_model.eval().requires_grad_(False).to(accelerator.device)
+       
     
     # TODO: This is only for JiT-B/16 and DION-S/16
     repa_projector = nn.Sequential( nn.Linear(jit_model.hidden_size, 2048), nn.SiLU(), nn.Linear(2048, 2048), nn.SiLU(), nn.Linear(2048, dino_model.dim),)
@@ -107,18 +111,10 @@ def main():
     # optimizer
     # effective_bs = cfg.local_batch_size * accelerator.num_processes
     jit_lr = cfg.blr * cfg.global_batch_size / 256
-    dino_lr = cfg.dino_blr * cfg.global_batch_size / 256
 
-    accelerator.print(f'JiT learning rate: {jit_lr}; DINO learning rate: {dino_lr}')
+    accelerator.print(f'JiT learning rate: {jit_lr}')
 
     jit_optimizer = torch.optim.AdamW(list(jit_model.parameters()) + list(repa_projector.parameters()), lr=jit_lr, betas=(0.9, 0.95), weight_decay=0)
-    decay, no_decay = [], []
-    for name, param in dino_model.named_parameters():
-        if param.ndim == 1 or name.endswith('.bias'):
-            no_decay.append(param)
-        else:
-            decay.append(param)
-    dino_optimizer = torch.optim.AdamW([{'params': decay, 'weight_decay': cfg.weight_decay}, {'params': no_decay, 'weight_decay': 0.0}], lr=dino_lr, betas=(0.9, 0.999))
 
 
     # model = torch.compile(model)
@@ -129,29 +125,24 @@ def main():
     # warmup_steps = cfg.warmup_epochs * len(dataloader)
     # lr_lambda = lambda cur_step : cur_step / warmup_steps if cur_step < warmup_steps else 1.0 
     # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lr_lambda)
-    center = torch.zeros(1, 65536, device=accelerator.device)
     mean = torch.tensor([0.485, 0.456, 0.406], device=accelerator.device).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225], device=accelerator.device).view(1, 3, 1, 1)
 
-    cosine_value = lambda start,end, step, total_steps: end + 0.5 * (start-end) * (1 + np.cos(np.pi*step/total_steps))
     total_steps, warmup_steps = cfg.epochs * len(dataloader), cfg.warmup_epochs * len(dataloader)
-    jit_model, dino_model, repa_projector, jit_optimizer, dino_optimizer = accelerator.prepare( jit_model, dino_model, repa_projector, jit_optimizer, dino_optimizer)
+    jit_model, repa_projector, jit_optimizer = accelerator.prepare( jit_model,  repa_projector, jit_optimizer)
     accelerator.print(f"Num proccess: {accelerator.num_processes}; Mixed precision: {accelerator.mixed_precision}")
     accelerator.print(f"Dataset size: {len(dataset)} images")
 
     # num_params = sum(p.numel() for p in model.parameters())
     num_params_jit, num_params_dino = sum(p.numel() for p in jit_model.parameters() if p.requires_grad), sum(p.numel() for p in dino_model.parameters() if p.requires_grad)
-    accelerator.print(f"Model {cfg.dit_type} has trainable {num_params_jit/1e6:.6f} M parameters; Model {cfg.dino_type} has trainable {num_params_dino/1e6:.6f} M parameters.")
+    accelerator.print(f"Model {cfg.dit_type} has trainable {num_params_jit/1e6:.6f} M parameters;")
     accelerator.print(f"Parameter dtypes: {next(jit_model.parameters()).dtype}")
 
     # start training
     update_ema(jit_ema, accelerator.unwrap_model(jit_model), decay=0)  # Initialize EMA with the same weights as the model
-    update_ema(dino_ema, accelerator.unwrap_model(dino_model), decay=0)  # Initialize EMA with the same weights as the model
 
-    dino_model.train() # important, train(). => class dropout.
     jit_model.train()
     repa_projector.train()
-    dino_ema.eval()
     jit_ema.eval()
     
     start_epoch,train_steps, log_steps, running_jit_loss, running_dino_loss,  running_reg_loss, running_fm_loss = 1,0,0,0,0,0,0,
@@ -159,50 +150,25 @@ def main():
 
     for epoch in range(start_epoch, cfg.epochs+1):
         accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch}/{cfg.epochs}...")
-        tea_temp = np.interp(epoch-1, [0, cfg.warmup_teacher_temp_epochs -1], [cfg.warmup_teacher_temp, cfg.teacher_temp])
         for images, y in dataloader:
             #scheduler:
             if train_steps < warmup_steps:
                 jit_lr_now = jit_lr * train_steps / (warmup_steps -1)
-                dino_lr_now = dino_lr * train_steps / (warmup_steps -1)
             else:
                 jit_lr_now = jit_lr
-                dino_lr_now = cosine_value(dino_lr, cfg.min_lr, train_steps-warmup_steps, total_steps-warmup_steps)
             
             for group in jit_optimizer.param_groups:
                 group['lr'] = jit_lr_now
-            for group in dino_optimizer.param_groups:
-                group['lr'] = dino_lr_now
 
-            dino_optimizer.param_groups[0]['weight_decay'] = cosine_value(cfg.weight_decay, cfg.weight_decay_end, train_steps, total_steps) 
-            dino_ema_decay = cosine_value(cfg.dino_ema_decay, 1.0, train_steps, total_steps)
-
-
-            # Calcualte DINO Loss
-            global_views = torch.cat(images[1:1+cfg.global_views],dim=0) #[2B, 3, 224, 224]
-            local_views =  torch.cat(images[1+cfg.global_views:], dim=0) #[10B, 3, 96, 96]
-            with accelerator.autocast():
-                with torch.no_grad():
-                    tea_logits = dino_ema(global_views) #[2B, K]
-                stu_global = dino_model(global_views)
-                stu_local = dino_model(local_views)
-            stu_logits = torch.cat([stu_global, stu_local],dim=0)  #[10B, K]
-
-            # Loss Calculation
-            dino_loss = compute_dino_loss(stu_logits, tea_logits, center, cfg, tea_temp)
-            # update center
-            with torch.no_grad():
-                batch_center = accelerator.reduce(tea_logits.float().mean(dim=0, keepdim=True), reduction='mean')
-                center = center* 0.9 + batch_center * 0.1    
 
             # JiT
-            clean_x = images[0] # jit input
+            clean_x = images # jit input
             clean_x = clean_x.to(accelerator.device, non_blocking=True).to(torch.float32).div_(255)
 
             with accelerator.autocast():
                 with torch.no_grad():
-                    teacher_tokens = dino_ema.forward_feature( (clean_x - mean) / std) # TODO: Can we directly use 2*clean -1 ==> the same as JiT.
-                    target = dino_ema.norm(teacher_tokens[:, 1:]) #[B, 256, dim]
+                    teacher_tokens = dino_model.forward_feature( (clean_x - mean) / std) # TODO: Can we directly use 2*clean -1 ==> the same as JiT.
+                    target = dino_model.norm(teacher_tokens[:, 1:]) #[B, 256, dim]
 
             x1 = 2.0 * clean_x - 1.0  
             # dropout labels, here we use constant dropout ratio as 0.1
@@ -231,26 +197,16 @@ def main():
                 jit_loss = fm_loss + cfg.reg_lam * reg_loss
 
 
-            # optimize dino
-            dino_optimizer.zero_grad()
-            accelerator.backward(dino_loss)
-            if epoch <= cfg.freeze_last_layer:
-                head = accelerator.unwrap_model(dino_model).head
-                head.prototypes.grad = None
-                head.prototype_scale.grad = None
-            dino_optimizer.step()     
 
             jit_optimizer.zero_grad()
             accelerator.backward(jit_loss)
             jit_optimizer.step()
             train_steps += 1
             update_ema(jit_ema, accelerator.unwrap_model(jit_model), decay=cfg.ema_decay)
-            update_ema(dino_ema, accelerator.unwrap_model(dino_model), decay=dino_ema_decay)
             log_steps += 1
             running_fm_loss += fm_loss.detach()
             running_reg_loss += reg_loss.detach()
             running_jit_loss += jit_loss.detach()  # only compare the standard FM loss.
-            running_dino_loss += dino_loss.detach()  # only compare the standard FM loss.
             if train_steps % cfg.log_step_freq == 0 :
                 avg_fm_loss = running_fm_loss / log_steps
                 avg_reg_loss = running_reg_loss / log_steps
@@ -258,7 +214,7 @@ def main():
                 avg_dino_loss = running_dino_loss / log_steps
                 elapsed = time() - train_start_time
                 accelerator.print(
-                    f"Step {train_steps}, FM Loss: {avg_fm_loss:.4f}, Reg Loss:{avg_reg_loss:.4f}, Jit Loss:{avg_jit_loss:.4f}, Dino Loss:{avg_dino_loss:.4f}, Avg_sample_t:{t.mean().item():.4f} " +
+                    f"Step {train_steps}, FM Loss: {avg_fm_loss:.4f}, Reg Loss:{avg_reg_loss:.4f}, Jit Loss:{avg_jit_loss:.4f}, Avg_sample_t:{t.mean().item():.4f} " +
                     f"Elapsed: {elapsed:.1f}s",
                     
                     flush=True,
@@ -272,8 +228,6 @@ def main():
             to_save = {
                 "jit_model": accelerator.unwrap_model(jit_model).state_dict(),
                 "jit_ema": jit_ema.state_dict(),
-                "dino_model": accelerator.unwrap_model(dino_model).state_dict(),
-                "dino_ema": dino_ema.state_dict(),
                 "epoch": epoch,
                 "args": cfg,
             }
