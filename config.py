@@ -162,6 +162,8 @@ class DefaultConfig:
         parser.add_argument('--dino_ema_decay', type=float)
         # for CoFlow
         parser.add_argument('--flow_type',type=str)
+        parser.add_argument('--dino_image_size', type=int)
+        parser.add_argument('--dino_residual', action='store_true')
         #for sampling
         parsed_args = parser.parse_args(args=args)
         
