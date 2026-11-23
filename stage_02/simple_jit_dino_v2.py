@@ -236,7 +236,7 @@ def main():
                 v_target = (x1 - xt) / (1-t).clamp_min(0.05)
 
                 x1_pred = jit_model(zt, t.flatten(), y)
-                v_pred = (x1_pred - xt) / (1 - t).clamp_min(0.05)
+                v_pred = (x1_pred - xt) / (1 - t).clamp_min(0.05)≈
                 fm_loss = (v_target - v_pred)**2 # (B, C, H, W)
                 fm_loss = fm_loss.mean(dim=[1,2,3]).mean()
 

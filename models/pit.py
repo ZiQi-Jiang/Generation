@@ -232,7 +232,7 @@ class PiTBlock(nn.Module):
         BN, P2, d = x_pixel.shape
         B, N, D = s.shape
         # pixel-specific control from patch-level representation s.
-        s_pixel = rearrange(s, 'b n d -> (b n)  d')  # (B*N,  D) for pixel-level decoder.
+        s_pixel = rearrange(s, 'b n d -> (b n) d')  # (B*N,  D) for pixel-level decoder.
         s_condition = self.adaLN_modulation(s_pixel) # (B*N, d*6*patch_size*patch_size)
         s_condition = rearrange(s_condition, 'bn (p2 d6) -> bn p2 d6', p2=P2)  # (B*N, patch_size*patch_size, 6*d)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = s_condition.chunk(6, dim=-1)  # (BN,p2,d) each
@@ -307,7 +307,13 @@ class PiT(nn.Module):
             self.pit_initialize_weights()
 
         def pit_initialize_weights(self):
-
+            # Initialize transformer layers:
+            def _basic_init(module):
+                if isinstance(module, nn.Linear):
+                    torch.nn.init.xavier_uniform_(module.weight)
+                    if module.bias is not None:
+                        nn.init.constant_(module.bias, 0)
+            self.apply(_basic_init)
 
             w = self.s_embedder.weight.data
             nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
