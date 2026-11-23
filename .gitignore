@@ -109,6 +109,3 @@ linear_probing/figures.ipynb
 linear_probing/results.jsonl
 .claude/
 .vscode/
-
-*.sh
-*.sh

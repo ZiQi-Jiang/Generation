@@ -95,8 +95,11 @@ def main():
     # TODO: proj_drop 
     jit_model = JiT_models[cfg.dit_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
     jit_model.x_embedder =  nn.Sequential( nn.Linear(dino_model.dim, 2048), nn.SiLU(), nn.Linear(2048, 2048), nn.SiLU(), nn.Linear(2048, jit_model.hidden_size),)
+    jit_params = list(jit_model.parameters())
+
     if cfg.dino_residual:
-        jit_model.residual_projector = nn.Linear(jit_model.patch_size* jit_model.patch_size * 3, dino_model.dim)
+        residual_projector = nn.Linear(jit_model.patch_size* jit_model.patch_size * 3, dino_model.dim)
+        jit_params += list(residual_projector.parameters())
     jit_ema = deepcopy(jit_model).to(accelerator.device)
     for param in jit_ema.parameters():
         param.requires_grad_(False)
@@ -110,7 +113,8 @@ def main():
 
     accelerator.print(f'JiT learning rate: {jit_lr}; DINO learning rate: {dino_lr}')
 
-    jit_optimizer = torch.optim.AdamW(list(jit_model.parameters()), lr=jit_lr, betas=(0.9, 0.95), weight_decay=0)
+
+    jit_optimizer = torch.optim.AdamW(jit_params, lr=jit_lr, betas=(0.9, 0.95), weight_decay=0)
     decay, no_decay = [], []
     for name, param in dino_model.named_parameters():
         if param.ndim == 1 or name.endswith('.bias'):
@@ -140,7 +144,9 @@ def main():
 
     cosine_value = lambda start,end, step, total_steps: end + 0.5 * (start-end) * (1 + np.cos(np.pi*step/total_steps))
     total_steps, warmup_steps = cfg.epochs * len(dataloader), cfg.warmup_epochs * len(dataloader)
-    jit_model, dino_model,  jit_optimizer, dino_optimizer = accelerator.prepare( jit_model, dino_model,  jit_optimizer, dino_optimizer)
+    if cfg.dino_residual:
+        residual_projector = accelerator.prepare(residual_projector)
+    jit_model, dino_model,  jit_optimizer, dino_optimizer = accelerator.prepare( jit_model, dino_model, jit_optimizer, dino_optimizer)
     accelerator.print(f"Num proccess: {accelerator.num_processes}; Mixed precision: {accelerator.mixed_precision}")
     accelerator.print(f"Dataset size: {len(dataset)} images")
 
@@ -227,8 +233,9 @@ def main():
                     zt = teacher_tokens[:, 1:]
 
                 if cfg.dino_residual:
-                    xt_input = rearrange(xt, 'b c (h p1) (w p2) -> b (h w) (c p1 p2)', p1=accelerator.unwrap_model(jit_model).patch_size,p2=accelerator.unwrap_model(jit_model).patch_size)
-                    zt = zt + accelerator.unwrap_model(jit_model).residual_projector(xt_input)
+                    patch_size = accelerator.unwrap_model(jit_model).patch_size
+                    xt_input = rearrange(xt, 'b c (h p1) (w p2) -> b (h w) (c p1 p2)', p1=patch_size,p2=patch_size)
+                    zt = zt + residual_projector(xt_input)
                 
 
 
@@ -236,7 +243,7 @@ def main():
                 v_target = (x1 - xt) / (1-t).clamp_min(0.05)
 
                 x1_pred = jit_model(zt, t.flatten(), y)
-                v_pred = (x1_pred - xt) / (1 - t).clamp_min(0.05)≈
+                v_pred = (x1_pred - xt) / (1 - t).clamp_min(0.05)
                 fm_loss = (v_target - v_pred)**2 # (B, C, H, W)
                 fm_loss = fm_loss.mean(dim=[1,2,3]).mean()
 
@@ -289,7 +296,8 @@ def main():
                 "epoch": epoch,
                 "args": cfg,
             }
-
+            if cfg.dino_residual:
+                to_save['residual_projector'] = accelerator.unwrap_model(residual_projector).state_dict()
             checkpoint_path = os.path.join(cfg.results_dir, f"epoch_{epoch:03d}.pth")
             if accelerator.is_main_process:
                 torch.save(to_save, checkpoint_path)
