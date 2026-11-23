@@ -374,6 +374,9 @@ class PiT(nn.Module):
 def PiT_B_16(**kwargs):
     return PiT(patch_depth=12, pixel_depth=2, hidden_dim=768, num_heads=12, pixel_hidden_dim=16, patch_size=16, **kwargs)
 
+def myPiT_B_16(**kwargs):
+    return PiT(patch_depth=7, pixel_depth=2, hidden_dim=768, num_heads=12, pixel_hidden_dim=16, patch_size=16, **kwargs)
+
 def PiT_B_4(**kwargs):
     return PiT(patch_depth=12, pixel_depth=2, hidden_dim=768, num_heads=12, pixel_hidden_dim=16, patch_size=4,  **kwargs)
 
@@ -390,6 +393,7 @@ def PiT_XL_16(**kwargs):
 
 PiT_models = {
     "PiT-B/16": PiT_B_16,
+    "myPiT-B/16": myPiT_B_16,
     "PiT-B/4": PiT_B_4,
     "PiT-B/32": PiT_B_32,
     "PiT-L/16": PiT_L_16,

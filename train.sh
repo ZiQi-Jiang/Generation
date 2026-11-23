@@ -15,7 +15,7 @@ epochs=200
 
 accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
   stage_01/train_pit.py \
-  --dit_type 'PiT-B/16' \
+  --dit_type 'myPiT-B/16' \
   --dino_image_size 256 \
   --timestamp pixeldit/cond/"$timestamp" \
   --epochs "$epochs" \
@@ -25,7 +25,7 @@ accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
 
 accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
   stage_01/train_pit.py \
-  --dit_type 'PiT-B/16' \
+  --dit_type 'myPiT-B/16' \
   --dino_image_size 256 \
   --timestamp pixeldit/uncond/"$timestamp" \
   --epochs "$epochs" \
@@ -35,7 +35,7 @@ accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
 
 accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
   stage_01/train_ddt.py \
-  --dit_type 'DDT-B/16' \
+  --dit_type 'myDDT-B/16' \
   --dino_image_size 256 \
   --timestamp ddt/cond/"$timestamp" \
   --epochs "$epochs" \
@@ -45,7 +45,7 @@ accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
 
 accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
   stage_01/train_ddt.py \
-  --dit_type 'DDT-B/16' \
+  --dit_type 'myDDT-B/16' \
   --dino_image_size 256 \
   --timestamp ddt/uncond/"$timestamp" \
   --epochs "$epochs" \

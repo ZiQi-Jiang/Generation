@@ -332,6 +332,9 @@ class DDT(nn.Module):
 def DDT_B_16(**kwargs):
     return DDT(encoder_depth=12, decoder_depth=2, encoder_hidden_dim=768, num_heads=12, decoder_hidden_dim=768, patch_size=16, **kwargs)
 
+def myDDT_B_16(**kwargs):
+    return DDT(encoder_depth=10, decoder_depth=2, encoder_hidden_dim=768, num_heads=12, decoder_hidden_dim=768, patch_size=16, **kwargs)
+
 def DDT_B_4(**kwargs):
     return DDT(encoder_depth=12, decoder_depth=2, encoder_hidden_dim=768, num_heads=12, decoder_hidden_dim=768, patch_size=4,  **kwargs)
 
@@ -348,6 +351,7 @@ def DDT_XL_16(**kwargs):
 
 DDT_models = {
     "DDT-B/16": DDT_B_16,
+    "myDDT-B/16": myDDT_B_16,
     "DDT-B/4": DDT_B_4,
     "DDT-B/32": DDT_B_32,
     "DDT-L/16": DDT_L_16,
