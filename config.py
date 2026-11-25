@@ -93,7 +93,9 @@ class DefaultConfig:
         # for selfflow
         self.selfflow_mask_ratio = 0.25
         self.selfflow_depth_tea = 8
-        
+
+        # for stage_02/explore_dino_feature_usage.py
+        self.use_dino_type = 'none' # default is jit
         # for frequency
         # self.jacobian = 'repa' #['repa', 'freq']
         # self.freq_w_type = 'rgb' #['rgb', channel]
@@ -164,6 +166,9 @@ class DefaultConfig:
         parser.add_argument('--flow_type',type=str)
         parser.add_argument('--dino_image_size', type=int)
         parser.add_argument('--dino_residual', action='store_true')
+
+        # for explore_dino_feature_usage.py:
+        parser.add_argument('--use_dino_type', type=str)
         #for sampling
         parsed_args = parser.parse_args(args=args)
         

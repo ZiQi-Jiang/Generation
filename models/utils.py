@@ -116,7 +116,7 @@ def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
-def modulate_token(x, shift, scale):
+def spatial_modulate(x, shift, scale):
     """"
     x: (B, N, D)
     shift, scale: (B,N,D)

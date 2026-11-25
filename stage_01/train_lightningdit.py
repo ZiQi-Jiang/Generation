@@ -10,11 +10,13 @@ from time import time
 from einops import rearrange
 from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import set_seed, broadcast_object_list
-from models.jit_clean import JiT_models
+from models.lightning_sit import SiT_models
 from PIL import Image
 import numpy as np
-
-
+from datasets.dataset import LMDBLatentsDataset
+from diffusers.models import AutoencoderKL
+from types import SimpleNamespace
+from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 @torch.no_grad()
 def update_ema(ema_model, model, decay=0.9999):
     """
@@ -90,14 +92,16 @@ def main():
 
         dataset = ImageFolder(cfg.data_path, transform=transform)
 
-    dataloader = tud.DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=12, pin_memory=True, drop_last=True)
+    dataloader = tud.DataLoader(dataset, batch_size=cfg.local_batch_size, shuffle=True, num_workers=12, pin_memory=True, drop_last=True)
 
     #prepare model
     assert cfg.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = cfg.image_size // 8
 
     # TODO: proj_drop 
-    model = JiT_models[cfg.dit_type](input_size=cfg.image_size, in_channels=3, num_classes=cfg.num_classes, mlp_ratio=4)
+    input_size = latent_size
+    in_channels = 4
+    model = SiT_models[cfg.dit_type](input_size=input_size, in_channels=in_channels, num_classes=cfg.num_classes, mlp_ratio=4)
     ema = deepcopy(model).to(accelerator.device)
     for param in ema.parameters():
         param.requires_grad_(False)
@@ -114,8 +118,7 @@ def main():
 
 
     # model = torch.compile(model)
-    if cfg.data_backend == 'pil':
-        dataloader = accelerator.prepare(dataloader)
+    dataloader = accelerator.prepare(dataloader)
     
     # linear warmup, then constant
     # warmup_steps = cfg.warmup_epochs * len(dataloader)
@@ -136,7 +139,8 @@ def main():
 
     # start training
     update_ema(ema, accelerator.unwrap_model(model), decay=0)  # Initialize EMA with the same weights as the model
-
+    if not cfg.use_latent:
+        vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(accelerator.device).eval()
     model.train() # important, train(). => class dropout.
     ema.eval()
     start_epoch,train_steps, log_steps, running_loss, running_reg_loss, running_fm_loss = 1,0,0,0,0,0
@@ -145,7 +149,7 @@ def main():
     for epoch in range(start_epoch, cfg.epochs+1):
         accelerator.print(f"[Exp Id: {cfg.timestamp}] | Start Epoch {epoch}/{cfg.epochs}...")
 
-        for x1, y in dataloader:
+        for raw_x, y in dataloader:
             #scheduler:
             if train_steps < warmup_steps:
                 lr_now = lr * train_steps / (warmup_steps -1)
@@ -156,10 +160,17 @@ def main():
                 group['lr'] = lr_now
             # x1: (B,C,H,W)
             # y: (B,)
-            
-            # 1. scale x to [-1, 1]
-            x1 = x1.to(accelerator.device, non_blocking=True).to(torch.float32).div_(255)
-            x1 = 2.0 * x1 - 1.0  
+            with torch.no_grad(): # vae should be fp32.
+                if cfg.use_latent:
+                    latent = raw_x
+                    posterior = DiagonalGaussianDistribution(latent)
+                    x1 = posterior.sample().mul_(0.18215)
+                else: 
+                    # vae input: [-1,1].
+                    raw_x = raw_x.to(accelerator.device, non_blocking=True).to(torch.float32).div_(255) # [0, 1]
+                    x1 = 2 * raw_x - 1
+                    x1 = vae.encode(x1).latent_dist.sample().mul_(0.18215)  # [B_local, C, H/8, W/8]
+                
 
             # dropout labels, here we use constant dropout ratio as 0.1
             drop_ids = torch.rand(y.shape[0], device=y.device) < cfg.drop_class

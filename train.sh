@@ -13,45 +13,124 @@ export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 timestamp=$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)
 epochs=200
 
+
+
 accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
-  stage_01/train_pit.py \
-  --dit_type 'myPiT-B/16' \
+  stage_02/explore_dino_feature_usage.py \
+  --dit_type 'PiT2-B/16' \
   --dino_image_size 256 \
-  --timestamp pixeldit/cond/"$timestamp" \
+  --timestamp dino_feature_usage/none/"$timestamp" \
   --epochs "$epochs" \
   --data_backend dali \
   --drop_class 0.1 \
-  --data_path ./data/imagenet/images/train
+  --data_path ./data/imagenet/images/train \
+  --use_dino_type 'none'
 
 accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
-  stage_01/train_pit.py \
-  --dit_type 'myPiT-B/16' \
+  stage_02/explore_dino_feature_usage.py \
+  --dit_type 'PiT2-B/16' \
   --dino_image_size 256 \
-  --timestamp pixeldit/uncond/"$timestamp" \
-  --epochs "$epochs" \
-  --data_backend dali \
-  --drop_class 1.0 \
-  --data_path ./data/imagenet/images/train
-
-accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
-  stage_01/train_ddt.py \
-  --dit_type 'myDDT-B/16' \
-  --dino_image_size 256 \
-  --timestamp ddt/cond/"$timestamp" \
+  --timestamp dino_feature_usage/pixeldit2/"$timestamp" \
   --epochs "$epochs" \
   --data_backend dali \
   --drop_class 0.1 \
-  --data_path ./data/imagenet/images/train
+  --data_path ./data/imagenet/images/train \
+  --use_dino_type 'pixeldit2'
 
 accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
-  stage_01/train_ddt.py \
-  --dit_type 'myDDT-B/16' \
+  stage_02/explore_dino_feature_usage.py \
+  --dit_type 'PiT2-B/16' \
   --dino_image_size 256 \
-  --timestamp ddt/uncond/"$timestamp" \
+  --timestamp dino_feature_usage/input/"$timestamp" \
   --epochs "$epochs" \
   --data_backend dali \
-  --drop_class 1.0 \
-  --data_path ./data/imagenet/images/train
+  --drop_class 0.1 \
+  --data_path ./data/imagenet/images/train \
+  --use_dino_type 'input'
+
+accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
+  stage_02/explore_dino_feature_usage.py \
+  --dit_type 'PiT2-B/16' \
+  --dino_image_size 256 \
+  --timestamp dino_feature_usage/residual/"$timestamp" \
+  --epochs "$epochs" \
+  --data_backend dali \
+  --drop_class 0.1 \
+  --data_path ./data/imagenet/images/train \
+  --use_dino_type 'residual'
+
+
+
+
+
+# accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
+#   stage_01/train_pit.py \
+#   --dit_type 'PiT-XL/16' \
+#   --dino_image_size 256 \
+#   --timestamp pixeldit/uncond/"$timestamp" \
+#   --epochs "$epochs" \
+#   --data_backend dali \
+#   --drop_class 0.1 \
+#   --data_path ./data/imagenet/images/train
+
+# accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
+#   stage_01/train_lightningdit.py \
+#   --dit_type 'SiT-B/2' \
+#   --timestamp lightningdit/cond/"$timestamp" \
+#   --epochs "$epochs" \
+#   --drop_class 0.1 \
+#   --data_path ./data/imagenet/images/train \
+#   --use_latent
+
+
+# accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
+#   stage_01/train_lightningdit.py \
+#   --dit_type 'SiT-B/2' \
+#   --timestamp lightningdit/uncond/"$timestamp" \
+#   --epochs "$epochs" \
+#   --drop_class 1.0 \
+#   --data_path ./data/imagenet/images/train \
+#   --use_latent
+
+# accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
+#   stage_01/train_pit.py \
+#   --dit_type 'myPiT-B/16' \
+#   --dino_image_size 256 \
+#   --timestamp pixeldit/cond/"$timestamp" \
+#   --epochs "$epochs" \
+#   --data_backend dali \
+#   --drop_class 0.1 \
+#   --data_path ./data/imagenet/images/train
+
+# accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
+#   stage_01/train_pit.py \
+#   --dit_type 'myPiT-B/16' \
+#   --dino_image_size 256 \
+#   --timestamp pixeldit/uncond/"$timestamp" \
+#   --epochs "$epochs" \
+#   --data_backend dali \
+#   --drop_class 1.0 \
+#   --data_path ./data/imagenet/images/train
+
+# accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
+#   stage_01/train_ddt.py \
+#   --dit_type 'myDDT-B/16' \
+#   --dino_image_size 256 \
+#   --timestamp ddt/cond/"$timestamp" \
+#   --epochs "$epochs" \
+#   --data_backend dali \
+#   --drop_class 0.1 \
+#   --data_path ./data/imagenet/images/train
+
+# accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
+#   stage_01/train_ddt.py \
+#   --dit_type 'DDT-B/16' \
+#   --dino_image_size 256 \
+#   --timestamp ddt/uncond/"$timestamp" \
+#   --epochs "$epochs" \
+#   --data_backend dali \
+#   --drop_class 1.0 \
+#   --data_path ./data/imagenet/images/train
 
 
 # accelerate launch  --mixed_precision=bf16 --multi_gpu --num_processes 8\
