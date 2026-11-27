@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math 
+import math, timm
 from einops import rearrange, repeat
 from .utils import *
 
@@ -186,7 +186,8 @@ class PiT2(nn.Module):
         # for vit encoder branch
         if self.use_dino_type != 'none':
             if encoder_name == "dinov3_vits16":
-                self.vit_encoder = torch.hub.load('facebookresearch/dinov3','dinov3_vits16').eval()
+                # self.vit_encoder = torch.hub.load('facebookresearch/dinov3','dinov3_vits16').eval()
+                self.vit_encoder = timm.create_model('vit_small_patch16_dinov3.lvd1689m', pretrained=True).eval()
                 for p in self.vit_encoder.parameters():
                     p.requires_grad_(False)
 
@@ -258,8 +259,8 @@ class PiT2(nn.Module):
         mean = xt.new_tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
         std = xt.new_tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
         x_norm = (xt-mean) / std
-        raw_patch_tokens = self.vit_encoder.forward_features(x_norm)["x_norm_patchtokens"] # [B, 256, N]
-        return raw_patch_tokens 
+        raw_patch_tokens = self.vit_encoder.forward_features(x_norm) # [B, 256+1, N]
+        return raw_patch_tokens[:, self.vit_encoder.num_prefix_tokens:]
     
     def forward(self, x, t, y):
         # x: (B, C, H, W), [-1, 1]
